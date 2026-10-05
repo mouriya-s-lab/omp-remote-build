@@ -1,0 +1,37 @@
+{
+  "name": "omp-remote-build",
+  "version": "0.1.0",
+  "description": "omp plugin: per-worktree Mutagen replica to a remote Docker host with a Komodo-managed build/test container and container PTY tools.",
+  "keywords": [
+    "omp",
+    "oh-my-pi",
+    "mutagen",
+    "komodo",
+    "remote-build"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mouriya-s-lab/omp-remote-build.git"
+  },
+  "type": "module",
+  "omp": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "omp-unified-exec": "*"
+  },
+  "peerDependenciesMeta": {
+    "omp-unified-exec": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@oh-my-pi/pi-coding-agent": "18.6.1",
+    "@types/bun": "latest",
+    "omp-unified-exec": "github:mouriya-s-lab/omp-unified-exec",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "ssh": "build-host",
+  "remoteRoot": "/srv/remote-build",
+  "komodo": {
+    "profile": "build",
+    "server": "build-host",
+    "cliConfig": "~/.config/komodo/komodo.cli.toml"
+  },
+  "bin": {
+    "km": "km",
+    "mutagen": "mutagen"
+  }
+}

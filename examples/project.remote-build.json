@@ -1,0 +1,14 @@
+{
+  "image": "rust:1-bookworm",
+  "workdir": "/workspace",
+  "shell": "bash",
+  "ignore": ["*.log"],
+  "include": [".env.build"],
+  "containerFiles": {
+    ".cargo/config.toml": ".omp/container-cargo-config.toml"
+  },
+  "volumes": ["rb-cargo-registry:/usr/local/cargo/registry"],
+  "env": {
+    "CARGO_TARGET_DIR": "/workspace/target"
+  }
+}
