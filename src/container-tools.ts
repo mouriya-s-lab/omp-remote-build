@@ -104,14 +104,23 @@ function sendInput(session: ExecSession, input: string | undefined): void {
 	}
 }
 
-async function terminateSession(session: ExecSession): Promise<void> {
-	session.terminate();
-	await waitForExitOrDeadline({ exited: session.exited, durationMs: 2_000 });
-	if (!session.hasExited) {
-		session.kill("SIGKILL");
-		await waitForExitOrDeadline({ exited: session.exited, durationMs: 500 });
+/**
+ * `graceful`: SIGTERM, then SIGKILL after 2 s (container_kill_session).
+ * `immediate`: SIGKILL at once, because omp aborts session_shutdown handlers after 2 s.
+ */
+async function terminateSession(session: ExecSession, mode: "graceful" | "immediate"): Promise<void> {
+	switch (mode) {
+		case "graceful":
+			session.terminate();
+			await waitForExitOrDeadline({ exited: session.exited, durationMs: 2_000 });
+			if (!session.hasExited) session.kill("SIGKILL");
+			break;
+		case "immediate":
+			session.kill("SIGKILL");
+			break;
 	}
-	if (!session.hasExited) throw new Error(`Container session ${session.id} km client is still running after SIGTERM and SIGKILL; the session remains available for another kill attempt.`);
+	await waitForExitOrDeadline({ exited: session.exited, durationMs: 500 });
+	if (!session.hasExited) throw new Error(`Container session ${session.id} km client is still running after SIGKILL; the session remains available for another kill attempt.`);
 }
 
 /** Register one agent-session-owned PTY store on top of omp-unified-exec's PTY sessions. */
@@ -128,7 +137,7 @@ export function registerContainerTools(pi: ExtensionAPI, resolveEnv: (cwd: strin
 		lifecycle = "shutdown";
 		// Keep ownership until each local transport confirms exit. Killing km may leave the remote shell alive.
 		await Promise.all(store.values().map(async (session) => {
-			await terminateSession(session);
+			await terminateSession(session, "immediate");
 			store.remove(session.id);
 		}));
 	});
@@ -208,7 +217,7 @@ export function registerContainerTools(pi: ExtensionAPI, resolveEnv: (cwd: strin
 			const params = killSchema.parse(rawParams);
 			const env = await resolveEnv(ctx.cwd);
 			const session = getSession(params.session_id, env);
-			await terminateSession(session);
+			await terminateSession(session, "graceful");
 			const result = await collectSession(session, 500, undefined, onUpdate);
 			store.remove(session.id);
 			return result;
