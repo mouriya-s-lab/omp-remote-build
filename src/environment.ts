@@ -1,28 +1,45 @@
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 import { loadHost } from "./host.ts";
 import { deriveIgnoreRules } from "./ignores.ts";
 import { ensureContainer, komodoReachable } from "./komodo.ts";
 import { createSession, findSession, flush } from "./mutagen.ts";
+import { writeRemoteFile } from "./remote-files.ts";
 import { run } from "./run.ts";
-import type { EnvId, HostConfig, PreparedEnv, RemoteBuildConfig } from "./types.ts";
+import type { ContainerSpec, EnvId, HostConfig, PreparedEnv, ProjectId, RemoteBuildConfig } from "./types.ts";
 
 /** Git worktree root containing `cwd`, in canonical letter case (one identity per root on case-insensitive file systems). */
 export async function worktreeRoot(cwd: string): Promise<string> {
 	return realpathSync.native((await run(["git", "-C", cwd, "rev-parse", "--show-toplevel"])).trim());
 }
 
-/** `<slug>-<hash>`: readable, unique per absolute root, valid as Mutagen label value and docker name. */
-export function envIdFor(root: string): EnvId {
-	const slug = basename(root)
+/** Main checkout of the repository containing `cwd` (parent of the common git dir). */
+export async function mainCheckout(cwd: string): Promise<string> {
+	const common = (await run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
+	return common.replace(/\/\.git$/, "");
+}
+
+/** `<slug>-<hash>`: readable, unique per absolute path, valid as Mutagen label value and docker name. */
+function idFor(path: string): string {
+	const slug = basename(path)
 		.toLowerCase()
 		.replace(/[^a-z0-9]+/g, "-")
 		.replace(/^-+|-+$/g, "")
 		.slice(0, 40);
-	const hash = createHash("sha256").update(root).digest("hex").slice(0, 10);
-	return `${slug || "wt"}-${hash}` as EnvId;
+	const hash = createHash("sha256").update(path).digest("hex").slice(0, 10);
+	return `${slug || "wt"}-${hash}`;
+}
+
+/** Environment identity of worktree `root`. */
+export function envIdFor(root: string): EnvId {
+	return idFor(root) as EnvId;
+}
+
+/** Project identity of the repository whose main checkout is `mainRoot`. */
+export function projectIdFor(mainRoot: string): ProjectId {
+	return idFor(mainRoot) as ProjectId;
 }
 
 /** Loads the host config; throws unless the build host answers SSH and its Komodo Core answers the API. */
@@ -33,9 +50,21 @@ export async function checkHost(): Promise<HostConfig> {
 	return host;
 }
 
+/** The environment container: replica bind-mounted at the workdir, plus the configured volumes and env. */
+export function envContainerSpec(env: PreparedEnv, image: string): ContainerSpec {
+	return {
+		name: env.container,
+		image,
+		workdir: env.config.workdir,
+		mounts: [`${env.remotePath}:${env.config.workdir}`, ...env.config.volumes],
+		env: env.config.env,
+	};
+}
+
 /**
  * Brings up the environment for worktree `root`: Mutagen replica, container-only
- * files, and the Komodo container. Idempotent; an existing session is reused.
+ * files, and, for a configured image, the Komodo container. Other image sources
+ * leave the container to `remote_env_init`. Idempotent; an existing session is reused.
  */
 export async function prepareEnv(root: string, config: RemoteBuildConfig): Promise<PreparedEnv> {
 	const host = await checkHost();
@@ -44,29 +73,12 @@ export async function prepareEnv(root: string, config: RemoteBuildConfig): Promi
 	const session =
 		(await findSession(host, id)) ?? (await createSession(host, id, root, remotePath, await deriveIgnoreRules(root, config)));
 	await flush(host, session);
-	await uploadContainerFiles(host, root, remotePath, config);
-	const container = `rb-${id}`;
-	await ensureContainer(host, {
-		name: container,
-		image: config.image,
-		hostPath: remotePath,
-		workdir: config.workdir,
-		volumes: config.volumes,
-		env: config.env,
-	});
-	return { id, root, remotePath, mutagenSession: session, container, config, host };
-}
-
-async function uploadContainerFiles(host: HostConfig, root: string, remotePath: string, config: RemoteBuildConfig): Promise<void> {
 	for (const [target, source] of Object.entries(config.containerFiles)) {
-		const content = await readFile(join(root, source));
-		const dest = `${remotePath}/${target}`;
-		await run(["ssh", host.ssh, `mkdir -p ${shQuote(dirname(dest))} && cat > ${shQuote(dest)}`], {
-			stdin: content,
-		});
+		await writeRemoteFile(host, `${remotePath}/${target}`, await readFile(join(root, source)));
 	}
-}
-
-function shQuote(s: string): string {
-	return `'${s.replaceAll("'", `'\\''`)}'`;
+	const env: PreparedEnv = { id, root, remotePath, mutagenSession: session, container: `rb-${id}`, config, host };
+	if (config.imageSource.kind === "configured") {
+		await ensureContainer(host, envContainerSpec(env, config.imageSource.image), "ensure");
+	}
+	return env;
 }

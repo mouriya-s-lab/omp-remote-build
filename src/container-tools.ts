@@ -6,6 +6,7 @@ import { getPtyLoadError, isPtyAvailable } from "omp-unified-exec/src/pty.ts";
 import { ExecSession } from "omp-unified-exec/src/session.ts";
 import { SessionStore } from "omp-unified-exec/src/session-store.ts";
 import { unescapeChars } from "omp-unified-exec/src/unescape.ts";
+import { containerRunning, execArgv } from "./komodo.ts";
 import type { PreparedEnv } from "./types.ts";
 
 const EXIT_NOTE = "km always exits 0; this is only the local transport's exit code. Read command exit codes from the container shell output, e.g. echo $? immediately after the command.";
@@ -124,7 +125,7 @@ async function terminateSession(session: ExecSession, mode: "graceful" | "immedi
 }
 
 /** Register one agent-session-owned PTY store on top of omp-unified-exec's PTY sessions. */
-export function registerContainerTools(pi: ExtensionAPI, resolveEnv: (cwd: string) => Promise<PreparedEnv>): void {
+export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string) => Promise<PreparedEnv>): void {
 	const store = new SessionStore({ maxSessions: 64, lruProtectedCount: 8 });
 	let lifecycle: "active" | "shutdown" = "active";
 	const getSession = (id: number, env: PreparedEnv): ExecSession => {
@@ -149,12 +150,15 @@ export function registerContainerTools(pi: ExtensionAPI, resolveEnv: (cwd: strin
 		parameters: execSchema,
 		async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
 			const params = execSchema.parse(rawParams);
-			const env = await resolveEnv(ctx.cwd);
+			const env = await ensureEnv(ctx.cwd);
 			if (lifecycle === "shutdown") throw new Error("Remote-build session is shutting down; no new container PTYs can be opened.");
 			if (signal?.aborted) throw new Error("Container exec was cancelled before opening the PTY.");
 			if (!isPtyAvailable()) throw new Error(`Container PTY unavailable: ${getPtyLoadError() ?? "native PTY provider failed to load"}. omp-unified-exec's PTY provider must load in this omp runtime; restart omp after fixing it.`);
+			if (!(await containerRunning(env.host, env.container))) {
+				throw new Error(`Container ${env.container} is not running. Call remote_env_init to prepare this worktree's environment.`);
+			}
 			const session = ExecSession.spawn(store.allocateId(), {
-				command: [env.host.bin.km, "-c", env.host.komodo.cliConfig, "-p", env.host.komodo.profile, "exec", "--server", env.host.komodo.server, env.container, env.config.shell],
+				command: execArgv(env.host, env.container, env.config.shell),
 				cwd: env.root,
 				env: process.env,
 				tty: true,
@@ -175,7 +179,7 @@ export function registerContainerTools(pi: ExtensionAPI, resolveEnv: (cwd: strin
 		parameters: writeSchema,
 		async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
 			const params = writeSchema.parse(rawParams);
-			const env = await resolveEnv(ctx.cwd);
+			const env = await ensureEnv(ctx.cwd);
 			const session = getSession(params.session_id, env);
 			sendInput(session, params.chars);
 			const result = await collectSession(session, params.yield_time_ms ?? 250, signal, onUpdate);
@@ -191,7 +195,7 @@ export function registerContainerTools(pi: ExtensionAPI, resolveEnv: (cwd: strin
 		parameters: listSchema,
 		async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
 			listSchema.parse(rawParams);
-			const env = await resolveEnv(ctx.cwd);
+			const env = await ensureEnv(ctx.cwd);
 			const sessions = store.values().filter((session) => session.cwd === env.root).map((session) => ({
 				session_id: session.id,
 				transport: transportState(session),
@@ -215,7 +219,7 @@ export function registerContainerTools(pi: ExtensionAPI, resolveEnv: (cwd: strin
 		parameters: killSchema,
 		async execute(_toolCallId, rawParams, _signal, onUpdate, ctx) {
 			const params = killSchema.parse(rawParams);
-			const env = await resolveEnv(ctx.cwd);
+			const env = await ensureEnv(ctx.cwd);
 			const session = getSession(params.session_id, env);
 			await terminateSession(session, "graceful");
 			const result = await collectSession(session, 500, undefined, onUpdate);

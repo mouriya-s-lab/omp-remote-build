@@ -27,10 +27,22 @@ export interface HostConfig {
 	};
 }
 
+/**
+ * Where the project image comes from.
+ * `configured`: a ready image named in the config; deployed automatically.
+ * `dockerfile`: a repo-relative Dockerfile named in the config, built by `remote_env_init`.
+ * `detect`: `remote_env_init` probes for a Dockerfile, else a subagent prepares one.
+ */
+export type ImageSource =
+	| { readonly kind: "configured"; readonly image: string }
+	| { readonly kind: "dockerfile"; readonly path: string }
+	| { readonly kind: "detect" };
+
 /** Parsed `.omp/remote-build.json` at a worktree root. Presence opts the project in. */
 export interface RemoteBuildConfig {
-	/** Container image for the build/test container. */
-	readonly image: string;
+	readonly imageSource: ImageSource;
+	/** One-line shell command run with `<shell> -c` in the workdir of a fresh container after each init deployment. */
+	readonly bootstrap: string | null;
 	/** Mount point of the synced tree inside the container; also the container working dir. */
 	readonly workdir: string;
 	/** Shell started by the PTY tool inside the container. */
@@ -53,6 +65,25 @@ export interface RemoteBuildConfig {
 
 /** Stable identity of one environment; derived from the absolute worktree root. */
 export type EnvId = string & { readonly __brand: "EnvId" };
+
+/** Stable identity of one project (all worktrees of one repository); derived from the absolute main checkout root. */
+export type ProjectId = string & { readonly __brand: "ProjectId" };
+
+/** How the stored project image was produced. */
+export type ProjectImageSource =
+	| { readonly kind: "dockerfile"; readonly path: string; readonly sha256: string }
+	| { readonly kind: "generated"; readonly sha256: string };
+
+/** `<remoteRoot>/projects/<ProjectId>/project.json`: the project image shared by every worktree. */
+export interface ProjectRecord {
+	readonly image: string;
+	readonly source: ProjectImageSource;
+	readonly bootstrap: string | null;
+	/** ISO 8601. */
+	readonly builtAt: string;
+	/** Final answer of the preparer subagent that produced the image, verbatim. */
+	readonly preparerReport: string | null;
+}
 
 /** Everything needed to reach one environment once it is prepared. */
 export interface PreparedEnv {
@@ -82,14 +113,33 @@ export interface MutagenIgnoreRules {
 	readonly patterns: readonly string[];
 }
 
-/** Container to run for one environment. */
+/** Container to run through the container backend. */
 export interface ContainerSpec {
 	/** Komodo Deployment name and docker container name. */
 	readonly name: string;
 	readonly image: string;
-	/** Host path on the build host bind-mounted at `workdir`. */
-	readonly hostPath: string;
-	readonly workdir: string;
-	readonly volumes: readonly string[];
+	/** Container working directory; `null` keeps the image default. */
+	readonly workdir: string | null;
+	/** `docker run -v` specs, `host-or-volume:container[:mode]`. */
+	readonly mounts: readonly string[];
 	readonly env: Readonly<Record<string, string>>;
+}
+
+/** Outcome of a one-shot container run. */
+export interface OnceResult {
+	readonly exitCode: number;
+	/** Tail of stdout, then stderr after a `[stderr]` marker. */
+	readonly output: string;
+}
+
+/** Image build through the container backend. */
+export interface ImageBuildSpec {
+	/** Name of the helper container that runs the build. */
+	readonly name: string;
+	/** Tag to produce. */
+	readonly image: string;
+	/** Absolute build-context directory on the build host. */
+	readonly contextPath: string;
+	/** Dockerfile path relative to the context. */
+	readonly dockerfile: string;
 }

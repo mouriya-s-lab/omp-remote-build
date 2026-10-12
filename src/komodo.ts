@@ -1,4 +1,4 @@
-import type { ContainerSpec, HostConfig } from "./types.ts";
+import type { ContainerSpec, HostConfig, ImageBuildSpec, OnceResult } from "./types.ts";
 
 interface Endpoint {
 	readonly host: string;
@@ -15,7 +15,7 @@ interface ManagedConfig {
 	readonly volumes: string;
 	readonly environment: string;
 	readonly extra_args: readonly string[];
-	readonly restart: "unless-stopped";
+	readonly restart: "unless-stopped" | "no";
 	readonly skip_secret_interp: true;
 }
 
@@ -41,6 +41,9 @@ type Request =
 	| { readonly endpoint: "read"; readonly type: "ListFullDeployments"; readonly params: { readonly query: { readonly names: readonly string[] } } }
 	| { readonly endpoint: "read"; readonly type: "GetDeploymentContainer"; readonly params: { readonly deployment: string } }
 	| { readonly endpoint: "read"; readonly type: "GetUpdate"; readonly params: { readonly id: string } }
+	| { readonly endpoint: "read"; readonly type: "InspectDockerImage"; readonly params: { readonly server: string; readonly image: string } }
+	| { readonly endpoint: "read"; readonly type: "InspectDockerContainer"; readonly params: { readonly server: string; readonly container: string } }
+	| { readonly endpoint: "read"; readonly type: "GetContainerLog"; readonly params: { readonly server: string; readonly container: string; readonly tail: number; readonly timestamps: false } }
 	| { readonly endpoint: "write"; readonly type: "CreateDeployment"; readonly params: { readonly name: string; readonly config: ManagedConfig } }
 	| { readonly endpoint: "write"; readonly type: "UpdateDeployment"; readonly params: { readonly id: string; readonly config: ManagedConfig } }
 	| { readonly endpoint: "execute"; readonly type: "Deploy"; readonly params: { readonly deployment: string; readonly stop_signal: null; readonly stop_time: null } };
@@ -48,6 +51,11 @@ type Request =
 type Update =
 	| { readonly id: string; readonly status: "Queued" | "InProgress" }
 	| { readonly id: string; readonly status: "Complete"; readonly success: boolean };
+
+/** What the container runs: a long-lived service, or one command that exits. */
+type ContainerProcess =
+	| { readonly kind: "service" }
+	| { readonly kind: "once"; readonly entrypoint: string | null; readonly argv: readonly string[] };
 
 function record(value: unknown, field: string): Record<string, unknown> {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {
@@ -63,6 +71,11 @@ function string(value: unknown, field: string): string {
 
 function boolean(value: unknown, field: string): boolean {
 	if (typeof value !== "boolean") throw new Error(`Invalid Komodo response: ${field} must be a boolean`);
+	return value;
+}
+
+function number(value: unknown, field: string): number {
+	if (typeof value !== "number") throw new Error(`Invalid Komodo response: ${field} must be a number`);
 	return value;
 }
 
@@ -109,10 +122,9 @@ async function loadEndpoint(host: HostConfig): Promise<Endpoint> {
 	return { host: url.replace(/\/+$/, ""), key: required("key"), secret: required("secret") };
 }
 
-async function request(endpoint: Endpoint, operation: Request): Promise<unknown> {
-	let response: Response;
+async function send(endpoint: Endpoint, operation: Request): Promise<Response> {
 	try {
-		response = await fetch(`${endpoint.host}/${operation.endpoint}`, {
+		return await fetch(`${endpoint.host}/${operation.endpoint}`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", "x-api-key": endpoint.key, "x-api-secret": endpoint.secret },
 			body: JSON.stringify({ type: operation.type, params: operation.params }),
@@ -121,16 +133,51 @@ async function request(endpoint: Endpoint, operation: Request): Promise<unknown>
 	} catch {
 		throw new Error(`Komodo ${operation.type} could not reach Komodo Core ${endpoint.host} (network failure or 30s request timeout)`);
 	}
-	if (!response.ok) {
-		// Error bodies and execution logs may echo environment values; never expose them.
-		await response.body?.cancel();
-		throw new Error(`Komodo ${operation.type} failed: HTTP ${response.status}${response.status === 401 || response.status === 403 ? " (authentication or authorization failed)" : ""}`);
-	}
+}
+
+function failure(operation: Request, response: Response): Error {
+	return new Error(`Komodo ${operation.type} failed: HTTP ${response.status}${response.status === 401 || response.status === 403 ? " (authentication or authorization failed)" : ""}`);
+}
+
+async function json(operation: Request, response: Response): Promise<unknown> {
 	try {
 		return await response.json();
 	} catch {
 		throw new Error(`Komodo ${operation.type} returned invalid JSON`);
 	}
+}
+
+async function request(endpoint: Endpoint, operation: Request): Promise<unknown> {
+	const response = await send(endpoint, operation);
+	if (!response.ok) {
+		// Error bodies and execution logs may echo environment values; never expose them.
+		await response.body?.cancel();
+		throw failure(operation, response);
+	}
+	return json(operation, response);
+}
+
+/**
+ * Like `request`, but resolves `undefined` when Core answers HTTP 500 with a
+ * `trace` entry matching `absent` (Docker's "no such object" errors). The body
+ * is only matched, never exposed.
+ */
+async function requestOrAbsent(endpoint: Endpoint, operation: Request, absent: RegExp): Promise<unknown | undefined> {
+	const response = await send(endpoint, operation);
+	if (response.ok) return json(operation, response);
+	if (response.status === 500) {
+		let body: unknown;
+		try {
+			body = await response.json();
+		} catch {
+			body = undefined;
+		}
+		const trace = typeof body === "object" && body !== null && "trace" in body ? body.trace : undefined;
+		if (Array.isArray(trace) && trace.some((entry) => typeof entry === "string" && absent.test(entry))) return undefined;
+		throw failure(operation, response);
+	}
+	await response.body?.cancel();
+	throw failure(operation, response);
 }
 
 function parseDeployment(value: unknown): Deployment {
@@ -187,34 +234,39 @@ function shellWord(value: string): string {
 	return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
-function managedConfig(spec: ContainerSpec, server: string): ManagedConfig {
+function commandWord(value: string): string {
+	// The command is a single shell line, not key/value text: only line breaks and NUL are unsafe.
+	if (/[\r\n\0]/.test(value)) throw new Error("Komodo container command words cannot contain CR, LF or NUL");
+	return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function managedConfig(spec: ContainerSpec, process: ContainerProcess, server: string): ManagedConfig {
 	if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(spec.name)) throw new Error("Invalid Komodo container name");
 	if (!/^[a-zA-Z0-9][a-zA-Z0-9_./:@+-]*$/.test(spec.image)) throw new Error("Invalid Komodo container image reference");
-	if (!spec.hostPath.startsWith("/") || !spec.workdir.startsWith("/") || /[:=]/.test(spec.hostPath)) {
-		throw new Error("Komodo hostPath and workdir must be absolute paths; hostPath cannot contain ':' or '='");
-	}
-	const volumes = [`${shellWord(spec.hostPath)}:${shellWord(spec.workdir)}`];
-	for (const volume of spec.volumes) {
-		const separator = volume.indexOf(":");
-		if (separator <= 0 || separator === volume.length - 1 || volume.slice(0, separator).includes("=")) {
+	if (spec.workdir !== null && !spec.workdir.startsWith("/")) throw new Error("Komodo container workdir must be an absolute path");
+	const volumes = spec.mounts.map((mount) => {
+		const separator = mount.indexOf(":");
+		if (separator <= 0 || separator === mount.length - 1 || mount.slice(0, separator).includes("=")) {
 			throw new Error("Invalid Komodo volume: expected host-or-volume:container[:mode]");
 		}
-		volumes.push(`${shellWord(volume.slice(0, separator))}:${shellWord(volume.slice(separator + 1))}`);
-	}
+		return `${shellWord(mount.slice(0, separator))}:${shellWord(mount.slice(separator + 1))}`;
+	});
 	const environment = Object.keys(spec.env).sort().map((name) => {
 		if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) throw new Error("Invalid Komodo environment variable name");
 		return `${name}=${shellWord(spec.env[name]!)}`;
 	}).join("\n");
+	const extraArgs = spec.workdir === null ? [] : ["--workdir", shellWord(spec.workdir)];
+	if (process.kind === "once" && process.entrypoint !== null) extraArgs.push("--entrypoint", shellWord(process.entrypoint));
 	return {
 		server_id: server,
 		swarm_id: "",
 		image: { type: "Image", params: { image: spec.image } },
-		command: "sleep infinity",
+		command: process.kind === "service" ? "sleep infinity" : process.argv.map(commandWord).join(" "),
 		// Komodo v2.2's conversion/env deserializers append a trailing newline.
-		volumes: `${volumes.join("\n")}\n`,
+		volumes: volumes.length === 0 ? "" : `${volumes.join("\n")}\n`,
 		environment: environment ? `${environment}\n` : "",
-		extra_args: ["--workdir", shellWord(spec.workdir)],
-		restart: "unless-stopped",
+		extra_args: extraArgs,
+		restart: process.kind === "service" ? "unless-stopped" : "no",
 		skip_secret_interp: true,
 	};
 }
@@ -233,7 +285,8 @@ async function containerState(endpoint: Endpoint, deployment: string): Promise<s
 	return string(response.state, "GetDeploymentContainer.state");
 }
 
-async function waitForDeployment(endpoint: Endpoint, deployment: string): Promise<void> {
+/** Runs Deploy and waits for its Update to complete successfully. */
+async function deploy(endpoint: Endpoint, deployment: string): Promise<void> {
 	let update = parseUpdate(await request(endpoint, {
 		endpoint: "execute", type: "Deploy", params: { deployment, stop_signal: null, stop_time: null },
 	}));
@@ -244,6 +297,9 @@ async function waitForDeployment(endpoint: Endpoint, deployment: string): Promis
 		update = parseUpdate(await request(endpoint, { endpoint: "read", type: "GetUpdate", params: { id: update.id } }));
 	}
 	if (!update.success) throw new Error(`Komodo deployment ${deployment} failed (Update ${update.id}); inspect the Update in Komodo Core`);
+}
+
+async function waitRunning(endpoint: Endpoint, deployment: string): Promise<void> {
 	const runningDeadline = Date.now() + 60_000;
 	let state = await containerState(endpoint, deployment);
 	while (state !== "running") {
@@ -253,28 +309,112 @@ async function waitForDeployment(endpoint: Endpoint, deployment: string): Promis
 	}
 }
 
-/** Create/update the plugin-owned config, deploy, and wait for a successful running container. */
-export async function ensureContainer(host: HostConfig, spec: ContainerSpec): Promise<void> {
-	const endpoint = await loadEndpoint(host);
+/** `spec`'s Deployment, created or updated to the plugin-owned config; `fresh` is false when it already matched. */
+async function upsertDeployment(endpoint: Endpoint, host: HostConfig, spec: ContainerSpec, process: ContainerProcess): Promise<{ deployment: Deployment; fresh: boolean }> {
 	const server = await request(endpoint, { endpoint: "read", type: "GetServer", params: { server: host.komodo.server } });
-	const desired = managedConfig(spec, mongoId(server));
+	const desired = managedConfig(spec, process, mongoId(server));
 	const resources = array(await request(endpoint, {
 		endpoint: "read", type: "ListFullDeployments", params: { query: { names: [spec.name] } },
 	}), "ListFullDeployments").map(parseDeployment);
 	const existing = resources.find((deployment) => deployment.name === spec.name);
-	let deployment: Deployment;
-	if (existing) {
-		if (matches(existing.config, desired)) {
-			// Core's periodically refreshed container state is the API's running-state contract.
-			if (await containerState(endpoint, existing.id) === "running") return;
-			deployment = existing;
-		} else {
-			deployment = parseDeployment(await request(endpoint, { endpoint: "write", type: "UpdateDeployment", params: { id: existing.id, config: desired } }));
-		}
-	} else {
-		deployment = parseDeployment(await request(endpoint, { endpoint: "write", type: "CreateDeployment", params: { name: spec.name, config: desired } }));
+	if (existing === undefined) {
+		return { deployment: parseDeployment(await request(endpoint, { endpoint: "write", type: "CreateDeployment", params: { name: spec.name, config: desired } })), fresh: true };
 	}
-	await waitForDeployment(endpoint, deployment.id);
+	if (matches(existing.config, desired)) return { deployment: existing, fresh: false };
+	return { deployment: parseDeployment(await request(endpoint, { endpoint: "write", type: "UpdateDeployment", params: { id: existing.id, config: desired } })), fresh: true };
+}
+
+/**
+ * Long-lived container for `spec`.
+ * `ensure`: create/update the plugin-owned config and deploy unless an unchanged container is already running.
+ * `redeploy`: always deploy, recreating the container.
+ */
+export async function ensureContainer(host: HostConfig, spec: ContainerSpec, mode: "ensure" | "redeploy"): Promise<void> {
+	const endpoint = await loadEndpoint(host);
+	const { deployment, fresh } = await upsertDeployment(endpoint, host, spec, { kind: "service" });
+	// Core's periodically refreshed container state is the API's running-state contract.
+	if (mode === "ensure" && !fresh && await containerState(endpoint, deployment.id) === "running") return;
+	await deploy(endpoint, deployment.id);
+	await waitRunning(endpoint, deployment.id);
+}
+
+async function inspectContainer(endpoint: Endpoint, host: HostConfig, container: string): Promise<Record<string, unknown> | undefined> {
+	const response = await requestOrAbsent(endpoint, {
+		endpoint: "read", type: "InspectDockerContainer", params: { server: host.komodo.server, container },
+	}, /No such container/);
+	return response === undefined ? undefined : record(record(response, "InspectDockerContainer").State, "State");
+}
+
+/**
+ * Runs `command` once in a fresh container for `spec` (no restart) and waits for it to exit.
+ * The Deployment stays after the run so the next run reuses it.
+ */
+export async function runOnce(
+	host: HostConfig,
+	spec: ContainerSpec,
+	command: { readonly entrypoint: string | null; readonly argv: readonly string[] },
+	options: { readonly timeoutMs: number; readonly signal?: AbortSignal },
+): Promise<OnceResult> {
+	const endpoint = await loadEndpoint(host);
+	const { deployment } = await upsertDeployment(endpoint, host, spec, { kind: "once", ...command });
+	await deploy(endpoint, deployment.id);
+	const deadline = Date.now() + options.timeoutMs;
+	let state: Record<string, unknown>;
+	for (;;) {
+		if (options.signal?.aborted) throw new Error(`${spec.name} aborted`);
+		const current = await inspectContainer(endpoint, host, spec.name);
+		if (current === undefined) throw new Error(`container ${spec.name} disappeared before it exited`);
+		const status = string(current.Status, "State.Status");
+		if (status === "exited" || status === "dead") {
+			state = current;
+			break;
+		}
+		if (Date.now() >= deadline) throw new Error(`${spec.name} still running after ${Math.round(options.timeoutMs / 60_000)} min`);
+		await Bun.sleep(2_000);
+	}
+	const log = record(await request(endpoint, {
+		endpoint: "read", type: "GetContainerLog", params: { server: host.komodo.server, container: spec.name, tail: 300, timestamps: false },
+	}), "GetContainerLog");
+	const stdout = string(log.stdout, "GetContainerLog.stdout");
+	const stderr = string(log.stderr, "GetContainerLog.stderr");
+	return {
+		exitCode: number(state.ExitCode, "State.ExitCode"),
+		output: [stdout.trimEnd(), stderr && `[stderr]\n${stderr.trimEnd()}`].filter((part) => part !== "").join("\n"),
+	};
+}
+
+/** Builds `spec.image` on the build host with a one-shot `docker:cli` container on the host Docker daemon. */
+export async function buildImage(host: HostConfig, spec: ImageBuildSpec, options: { readonly timeoutMs: number; readonly signal?: AbortSignal }): Promise<OnceResult> {
+	return runOnce(host, {
+		name: spec.name,
+		image: "docker:cli",
+		workdir: null,
+		mounts: ["/var/run/docker.sock:/var/run/docker.sock", `${spec.contextPath}:/ctx:ro`],
+		env: {},
+	}, {
+		entrypoint: "docker",
+		argv: ["build", "--progress=plain", "--tag", spec.image, "--file", `/ctx/${spec.dockerfile}`, "/ctx"],
+	}, options);
+}
+
+/** Whether `image` exists on the build host's Docker daemon. */
+export async function imageExists(host: HostConfig, image: string): Promise<boolean> {
+	const endpoint = await loadEndpoint(host);
+	const response = await requestOrAbsent(endpoint, {
+		endpoint: "read", type: "InspectDockerImage", params: { server: host.komodo.server, image },
+	}, /No such image/);
+	return response !== undefined;
+}
+
+/** Whether container `name` exists and is running on the build host. */
+export async function containerRunning(host: HostConfig, name: string): Promise<boolean> {
+	const state = await inspectContainer(await loadEndpoint(host), host, name);
+	return state !== undefined && boolean(state.Running, "State.Running");
+}
+
+/** argv of an interactive shell in `container` through the km CLI. */
+export function execArgv(host: HostConfig, container: string, shell: string): string[] {
+	return [host.bin.km, "-c", host.komodo.cliConfig, "-p", host.komodo.profile, "exec", "--server", host.komodo.server, container, shell];
 }
 
 /** Cheap authenticated Core read; the km CLI config is read anew so credential rotation takes effect. */

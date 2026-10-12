@@ -1,11 +1,11 @@
 import { realpathSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { loadConfig } from "./config.ts";
+import { CONFIG_PATH, loadConfig } from "./config.ts";
 import { registerContainerTools } from "./container-tools.ts";
-import { checkHost, envIdFor, prepareEnv, worktreeRoot } from "./environment.ts";
+import { checkHost, envIdFor, mainCheckout, prepareEnv, worktreeRoot } from "./environment.ts";
 import { loadHost } from "./host.ts";
+import { registerInitTools } from "./init.ts";
 import { findSession, flush } from "./mutagen.ts";
-import { run } from "./run.ts";
 import type { EnvState, PreparedEnv, RemoteBuildConfig } from "./types.ts";
 
 /** `/worktree [branch]` and its registered name `/wt`. */
@@ -33,6 +33,9 @@ const NON_WRITING_TOOLS: Record<string, true> = {
 	container_write_stdin: true,
 	container_list_sessions: true,
 	container_kill_session: true,
+	// Both flush the replica themselves and never write local files.
+	remote_env_init: true,
+	remote_env_build_image: true,
 };
 
 export default function remoteBuild(pi: ExtensionAPI) {
@@ -64,9 +67,17 @@ export default function remoteBuild(pi: ExtensionAPI) {
 		return undefined;
 	};
 
-	const resolveEnv = async (cwd: string): Promise<PreparedEnv> => {
+	/** The environment of the worktree containing `cwd`, prepared on demand inside a remote-build git worktree. */
+	const ensureEnv = async (cwd: string): Promise<PreparedEnv> => {
 		const state = stateFor(cwd);
-		if (state === undefined) throw new Error(`no remote-build environment for ${cwd}`);
+		if (state === undefined) {
+			const project = await projectConfig(cwd);
+			if (project === undefined) throw new Error(`${cwd} is not in a remote-build project (no ${CONFIG_PATH})`);
+			if (project.root === (await mainCheckout(project.root))) {
+				throw new Error(`remote-build environments exist only in git worktrees; ${project.root} is the main checkout`);
+			}
+			return begin(project.root, project.config);
+		}
 		switch (state.kind) {
 			case "ready":
 				return state.env;
@@ -77,7 +88,8 @@ export default function remoteBuild(pi: ExtensionAPI) {
 		}
 	};
 
-	registerContainerTools(pi, resolveEnv);
+	registerContainerTools(pi, ensureEnv);
+	registerInitTools(pi, ensureEnv);
 
 	// /worktree: check the build host before the native command runs, then wait for
 	// the session to move into the new worktree and prepare its environment there.
@@ -154,12 +166,6 @@ async function projectConfig(cwd: string): Promise<{ root: string; config: Remot
 	}
 	const config = await loadConfig(root);
 	return config === undefined ? undefined : { root, config };
-}
-
-/** Main checkout of the repository containing `cwd` (parent of the common git dir). */
-async function mainCheckout(cwd: string): Promise<string> {
-	const common = (await run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
-	return common.replace(/\/\.git$/, "");
 }
 
 function isIsolatedSubagent(ctx: ExtensionContext): boolean {

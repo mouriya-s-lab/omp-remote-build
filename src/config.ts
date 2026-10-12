@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { RemoteBuildConfig } from "./types.ts";
+import type { ImageSource, RemoteBuildConfig } from "./types.ts";
 
 /** Path of the opt-in config, relative to a worktree root. */
 export const CONFIG_PATH = ".omp/remote-build.json";
@@ -21,8 +21,11 @@ export async function loadConfig(root: string): Promise<RemoteBuildConfig | unde
 	return parseConfig(JSON.parse(text) as unknown);
 }
 
-const KNOWN_FIELDS: Record<keyof RemoteBuildConfig, true> = {
+type ConfigField = "image" | "dockerfile" | "workdir" | "shell" | "ignore" | "include" | "containerFiles" | "volumes" | "env" | "bootstrap";
+
+const KNOWN_FIELDS: Record<ConfigField, true> = {
 	image: true,
+	dockerfile: true,
 	workdir: true,
 	shell: true,
 	ignore: true,
@@ -30,6 +33,7 @@ const KNOWN_FIELDS: Record<keyof RemoteBuildConfig, true> = {
 	containerFiles: true,
 	volumes: true,
 	env: true,
+	bootstrap: true,
 };
 
 function parseConfig(raw: unknown): RemoteBuildConfig {
@@ -38,7 +42,8 @@ function parseConfig(raw: unknown): RemoteBuildConfig {
 		if (!(key in KNOWN_FIELDS)) throw new Error(`${CONFIG_PATH}: unknown field "${key}"`);
 	}
 	return {
-		image: nonEmptyString(obj.image, "image"),
+		imageSource: imageSource(obj.image, obj.dockerfile),
+		bootstrap: bootstrap(obj.bootstrap),
 		workdir: absolutePath(obj.workdir ?? "/workspace", "workdir"),
 		shell: nonEmptyString(obj.shell ?? "bash", "shell"),
 		ignore: stringArray(obj.ignore ?? [], "ignore"),
@@ -47,6 +52,22 @@ function parseConfig(raw: unknown): RemoteBuildConfig {
 		volumes: stringArray(obj.volumes ?? [], "volumes"),
 		env: stringRecord(obj.env ?? {}, "env"),
 	};
+}
+
+function imageSource(image: unknown, dockerfile: unknown): ImageSource {
+	if (image !== undefined && dockerfile !== undefined) {
+		throw new Error(`${CONFIG_PATH}: set at most one of "image" and "dockerfile"`);
+	}
+	if (image !== undefined) return { kind: "configured", image: nonEmptyString(image, "image") };
+	if (dockerfile !== undefined) return { kind: "dockerfile", path: relativePath(nonEmptyString(dockerfile, "dockerfile"), "dockerfile") };
+	return { kind: "detect" };
+}
+
+function bootstrap(value: unknown): string | null {
+	if (value === undefined) return null;
+	const command = nonEmptyString(value, "bootstrap");
+	if (/[\r\n\0]/.test(command)) throw new Error(`${CONFIG_PATH}: bootstrap must be a single line`);
+	return command;
 }
 
 function record(value: unknown, field: string): Record<string, unknown> {
