@@ -1,64 +1,63 @@
 import { z } from "@oh-my-pi/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import { CONFIG_PATH } from "./config.ts";
+import { CONFIG_PATH, GENERATED_DOCKERFILE, PREPARER_REPORT, loadConfig, publishPreparedImage, readPreparerReport } from "./config.ts";
 import { envContainerSpec, mainCheckout, projectIdFor } from "./environment.ts";
-import { buildImage, ensureContainer, imageExists, runOnce } from "./komodo.ts";
+import { ensureContainer, imageExists, runOnce } from "./komodo.ts";
 import { flush } from "./mutagen.ts";
 import { PREPARER_AGENT_NAME, runPreparer } from "./preparer.ts";
 import {
 	BASE_IMAGE,
-	BUILD_TIMEOUT_MS,
+	buildProjectImage,
 	ensureBaseImage,
-	finalStageBase,
 	outputTail,
-	projectDir,
+	prepareDir,
 	projectImage,
-	readRecord,
 	resolveDockerfile,
 	sha256,
-	writeRecord,
+	stageBases,
 } from "./project.ts";
-import { writeRemoteFile } from "./remote-files.ts";
-import type { ImageSource, OnceResult, PreparedEnv, ProjectRecord } from "./types.ts";
+import { readRemoteFile, removeRemoteDir, writeRemoteFile } from "./remote-files.ts";
+import type { DockerfileRef, ImageSource, OnceResult, PreparedEnv, RemoteBuildConfig } from "./types.ts";
 
 const BOOTSTRAP_TIMEOUT_MS = 30 * 60_000;
 
 const initSchema = z.object({
 	rebuild: z
-		.boolean()
+		.enum(["image", "prepare"])
 		.optional()
-		.describe("Rebuild the project image (Dockerfile: rebuild it; no Dockerfile: run the preparer subagent again) instead of reusing it."),
+		.describe(
+			`"image": rebuild the project image from the worktree Dockerfile even if it is cached. "prepare": run the preparer subagent again and publish a new ${GENERATED_DOCKERFILE} (only without a hand-written Dockerfile). Omit to reuse.`,
+		),
 });
 
 const buildSchema = z.object({
-	dockerfile: z.string().describe("Complete Dockerfile text; final stage FROM rb-base-archlinux:latest; empty build context."),
+	dockerfile: z.string().describe(`Complete Dockerfile text; final stage FROM ${BASE_IMAGE}; empty build context, so no COPY or ADD.`),
 	bootstrap: z
 		.string()
 		.describe("One-line idempotent shell command run in the working directory after each container deployment; empty string for none."),
 });
 
-/** How `remote_env_init` obtains the project image. */
+/** What the caller asked for. */
+type InitMode = "reuse" | "rebuild-image" | "reprepare";
+
+/** Where the image definition comes from in this call. */
 type ImagePlan =
 	| { readonly kind: "configured"; readonly image: string }
-	| { readonly kind: "reuse"; readonly record: ProjectRecord }
-	| { readonly kind: "build-dockerfile"; readonly path: string; readonly sha256: string }
-	| { readonly kind: "rebuild-generated"; readonly record: ProjectRecord }
+	| { readonly kind: "dockerfile"; readonly dockerfile: DockerfileRef }
 	| { readonly kind: "prepare" };
 
-/** What the build host and worktree hold for the project image. */
-interface ImageInventory {
-	readonly record: ProjectRecord | undefined;
-	readonly exists: boolean;
-	readonly dockerfile: { readonly path: string; readonly sha256: string } | undefined;
-}
-
-function planImage(source: ImageSource, rebuild: boolean, inventory: ImageInventory): ImagePlan {
-	if (source.kind === "configured") return { kind: "configured", image: source.image };
-	const { record, exists, dockerfile } = inventory;
-	if (!rebuild && record !== undefined && exists) return { kind: "reuse", record };
-	if (dockerfile !== undefined) return { kind: "build-dockerfile", ...dockerfile };
-	if (!rebuild && record?.source.kind === "generated") return { kind: "rebuild-generated", record };
-	return { kind: "prepare" };
+function planImage(source: ImageSource, mode: InitMode, dockerfile: DockerfileRef | undefined): ImagePlan {
+	if (source.kind === "configured") {
+		if (mode === "reprepare") throw new Error(`${CONFIG_PATH} names an image; there is nothing to prepare`);
+		return { kind: "configured", image: source.image };
+	}
+	if (mode === "reprepare") {
+		if (dockerfile !== undefined && dockerfile.path !== GENERATED_DOCKERFILE) {
+			throw new Error(`${dockerfile.path} is a hand-written Dockerfile; edit it and call remote_env_init with rebuild "image"`);
+		}
+		return { kind: "prepare" };
+	}
+	return dockerfile === undefined ? { kind: "prepare" } : { kind: "dockerfile", dockerfile };
 }
 
 function assertNever(value: never): never {
@@ -72,6 +71,7 @@ const REPORT_KEYS = [
 	"container",
 	"image",
 	"image_source",
+	"persisted",
 	"base_image",
 	"note",
 	"build_output_tail",
@@ -138,125 +138,127 @@ async function deployAndBootstrap(
 	);
 }
 
+/**
+ * The config fields `remote_env_init` publishes and applies in the running session, read from
+ * disk. Every other field keeps the value the environment was prepared with.
+ */
+async function liveEnv(env: PreparedEnv): Promise<PreparedEnv> {
+	const config: RemoteBuildConfig | undefined = await loadConfig(env.root);
+	if (config === undefined) throw new Error(`${CONFIG_PATH} disappeared from ${env.root}`);
+	return { ...env, config: { ...env.config, imageSource: config.imageSource, bootstrap: config.bootstrap } };
+}
+
+/**
+ * Runs the preparer from an empty scratch directory, and once it reports `result: success`,
+ * publishes its last successful candidate into the worktree. Returns the published Dockerfile.
+ */
+async function prepare(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	env: PreparedEnv,
+	report: Report,
+	signal: AbortSignal | undefined,
+): Promise<DockerfileRef> {
+	const dir = prepareDir(env.host, env.id);
+	await removeRemoteDir(env.host, dir);
+	const base = await ensureBaseImage(env.host, env.id, signal);
+	report.base_image = { kind: "line", value: `${BASE_IMAGE} (${base === "present" ? "present" : "built now"})` };
+	await ensureContainer(env.host, envContainerSpec(env, BASE_IMAGE), "redeploy");
+	const answer = await runPreparer(pi, ctx, env, signal);
+	report.preparer_report = { kind: "verbatim", text: answer };
+	if (!/^result:\s*success\s*$/m.test(answer)) throw new Error("the preparer did not report result: success; nothing was published");
+	const [dockerfile, bootstrap] = await Promise.all([readRemoteFile(env.host, `${dir}/Dockerfile`), readRemoteFile(env.host, `${dir}/bootstrap`)]);
+	if (dockerfile === undefined || bootstrap === undefined) {
+		throw new Error("the preparer reported success without a successful remote_env_build_image; nothing was published");
+	}
+	const hash = sha256(dockerfile);
+	await publishPreparedImage(env.root, { dockerfile, bootstrap: bootstrap.trim() || null, report: answer, sha256: hash });
+	await removeRemoteDir(env.host, dir);
+	report.persisted = {
+		kind: "line",
+		value: `${GENERATED_DOCKERFILE}, ${PREPARER_REPORT}, and dockerfile/bootstrap in ${CONFIG_PATH}; commit them so other worktrees and build hosts reuse this definition instead of preparing again`,
+	};
+	return { path: GENERATED_DOCKERFILE, sha256: hash, text: dockerfile };
+}
+
 /** Resolves the project image, recreates the worktree container from it and runs bootstrap; returns the report, or throws it on failure. */
 async function initEnvironment(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
-	env: PreparedEnv,
-	rebuild: boolean,
+	prepared: PreparedEnv,
+	mode: InitMode,
 	signal: AbortSignal | undefined,
 ): Promise<string> {
-	const { host, config } = env;
-	const report: Report = { worktree: { kind: "line", value: env.root } };
+	const { host } = prepared;
+	const report: Report = { worktree: { kind: "line", value: prepared.root } };
 	const phase = (name: string) => ctx.ui.setStatus("remote-build", `remote-build: init ${name}`);
 	try {
 		phase("sync");
-		await flush(host, env.mutagenSession);
-		const mainRoot = await mainCheckout(env.root);
+		await flush(host, prepared.mutagenSession);
+		const mainRoot = await mainCheckout(prepared.root);
 		const pid = projectIdFor(mainRoot);
 		report.project = { kind: "line", value: `${pid} (main checkout ${mainRoot})` };
 		report.container = {
 			kind: "line",
-			value: `${env.container} on server ${host.komodo.server}; workdir ${config.workdir}; shell ${config.shell}`,
+			value: `${prepared.container} on server ${host.komodo.server}; workdir ${prepared.config.workdir}; shell ${prepared.config.shell}`,
 		};
 
-		const source = config.imageSource;
-		phase("inspect");
-		const inventory: ImageInventory =
-			source.kind === "configured"
-				? { record: undefined, exists: false, dockerfile: undefined }
-				: await Promise.all([
-						readRecord(host, pid),
-						imageExists(host, projectImage(pid)),
-						resolveDockerfile(env.root, source),
-					]).then(([record, exists, dockerfile]) => ({ record, exists, dockerfile }));
-		const plan = planImage(source, rebuild, inventory);
-		const image = plan.kind === "configured" ? plan.image : projectImage(pid);
-		report.image = { kind: "line", value: image };
-
-		let record: ProjectRecord | undefined;
+		let env = await liveEnv(prepared);
+		const plan = planImage(env.config.imageSource, mode, await resolveDockerfile(env.root, env.config.imageSource));
+		let image: string;
 		switch (plan.kind) {
 			case "configured":
+				image = plan.image;
+				report.image = { kind: "line", value: image };
 				report.image_source = { kind: "line", value: "configured image" };
-				record = undefined;
 				break;
-			case "reuse": {
-				record = plan.record;
-				const from = record.source.kind === "dockerfile" ? `worktree Dockerfile ${record.source.path}` : "generated Dockerfile";
-				report.image_source = { kind: "line", value: `reused (built ${record.builtAt} from ${from})` };
-				const current = inventory.dockerfile;
-				if (
-					current !== undefined &&
-					(record.source.kind !== "dockerfile" || record.source.path !== current.path || record.source.sha256 !== current.sha256)
-				) {
-					report.note = {
-						kind: "line",
-						value: `worktree Dockerfile ${current.path} differs from the image source; call remote_env_init with rebuild=true to rebuild`,
-					};
+			case "prepare":
+			case "dockerfile": {
+				let dockerfile: DockerfileRef;
+				if (plan.kind === "prepare") {
+					phase("preparer");
+					report.image_source = { kind: "line", value: "prepared by subagent" };
+					dockerfile = await prepare(pi, ctx, env, report, signal);
+					env = await liveEnv(prepared);
+					await flush(host, env.mutagenSession);
+				} else {
+					dockerfile = plan.dockerfile;
 				}
-				break;
-			}
-			case "build-dockerfile": {
-				report.image_source = { kind: "line", value: `built from worktree Dockerfile ${plan.path}` };
-				phase("build");
-				const build = await buildImage(
-					host,
-					{ name: `rb-build-project-${pid}`, image, contextPath: env.remotePath, dockerfile: plan.path },
-					{ timeoutMs: BUILD_TIMEOUT_MS, signal },
-				);
-				report.build_output_tail = { kind: "tail", text: build.output };
-				if (build.exitCode !== 0) throw new Error(`image build failed (exit ${build.exitCode})`);
-				record = {
-					image,
-					source: { kind: "dockerfile", path: plan.path, sha256: plan.sha256 },
-					bootstrap: null,
-					builtAt: new Date().toISOString(),
-					preparerReport: null,
-				};
-				await writeRecord(host, pid, record);
-				break;
-			}
-			case "rebuild-generated": {
-				report.image_source = { kind: "line", value: "rebuilt from stored generated Dockerfile" };
-				phase("base image");
-				const base = await ensureBaseImage(host, signal);
-				report.base_image = { kind: "line", value: `${BASE_IMAGE} (${base.kind === "present" ? "present" : "built now"})` };
-				phase("build");
-				const build = await buildImage(
-					host,
-					{ name: `rb-build-project-${pid}`, image, contextPath: projectDir(host, pid), dockerfile: "Dockerfile" },
-					{ timeoutMs: BUILD_TIMEOUT_MS, signal },
-				);
-				report.build_output_tail = { kind: "tail", text: build.output };
-				if (build.exitCode !== 0) throw new Error(`image build failed (exit ${build.exitCode})`);
-				record = { ...plan.record, builtAt: new Date().toISOString() };
-				await writeRecord(host, pid, record);
-				break;
-			}
-			case "prepare": {
-				report.image_source = { kind: "line", value: "prepared by subagent" };
-				phase("base image");
-				const base = await ensureBaseImage(host, signal);
-				report.base_image = { kind: "line", value: `${BASE_IMAGE} (${base.kind === "present" ? "present" : "built now"})` };
-				phase("preparer");
-				await ensureContainer(host, envContainerSpec(env, BASE_IMAGE), "redeploy");
-				const started = Date.now();
-				const answer = await runPreparer(pi, ctx, env, image, signal);
-				report.preparer_report = { kind: "verbatim", text: answer };
-				const built = await readRecord(host, pid);
-				if (built?.source.kind !== "generated" || Date.parse(built.builtAt) < started || !(await imageExists(host, image))) {
-					throw new Error("preparer finished without a successful remote_env_build_image");
+				image = projectImage(pid, dockerfile.sha256);
+				report.image = { kind: "line", value: image };
+				if (mode !== "rebuild-image" && (await imageExists(host, image))) {
+					report.image_source ??= { kind: "line", value: `reused (cached build of ${dockerfile.path})` };
+				} else {
+					report.image_source ??= { kind: "line", value: `built from worktree Dockerfile ${dockerfile.path}` };
+					phase("build");
+					const build = await buildProjectImage(
+						host,
+						env.id,
+						image,
+						{ contextPath: env.remotePath, dockerfile: dockerfile.path, text: dockerfile.text },
+						signal,
+					);
+					if (build.base !== "unused") report.base_image = { kind: "line", value: `${BASE_IMAGE} (${build.base === "present" ? "present" : "built now"})` };
+					report.build_output_tail = { kind: "tail", text: build.result.output };
+					if (build.result.exitCode !== 0) throw new Error(`image build failed (exit ${build.result.exitCode})`);
 				}
-				record = { ...built, preparerReport: answer };
-				await writeRecord(host, pid, record);
+				const preparerReport = await readPreparerReport(env.root);
+				if (preparerReport !== undefined && report.preparer_report === undefined) {
+					report.preparer_report = { kind: "verbatim", text: preparerReport.text };
+					if (preparerReport.sha256 !== dockerfile.sha256) {
+						report.note = {
+							kind: "line",
+							value: `${PREPARER_REPORT} was written for an earlier version of ${dockerfile.path}; its claims may be stale`,
+						};
+					}
+				}
 				break;
 			}
 			default:
 				assertNever(plan);
 		}
-		if (record?.preparerReport != null) report.preparer_report = { kind: "verbatim", text: record.preparerReport };
 
-		const bootstrap = config.bootstrap ?? record?.bootstrap ?? null;
+		const bootstrap = env.config.bootstrap;
 		report.bootstrap = { kind: "line", value: bootstrap ?? "none" };
 		phase(bootstrap === null ? "deploy" : "deploy and bootstrap");
 		const boot = await deployAndBootstrap(env, image, bootstrap, signal);
@@ -267,7 +269,7 @@ async function initEnvironment(
 		}
 		report.usage = {
 			kind: "line",
-			value: `run project commands with container_exec in ${env.container}; local edits sync one-way into ${config.workdir} after each tool call; files created in the container are not copied back; call remote_env_init with rebuild=true after dependency changes (it recreates the container and ends open container sessions)`,
+			value: `run project commands with container_exec in ${env.container}; local edits sync one-way into ${env.config.workdir} after each tool call; files created in the container are not copied back; after dependency changes edit the Dockerfile (the image is cached per Dockerfile content) or call remote_env_init with rebuild "image" or "prepare"; every call recreates the container and ends open container sessions`,
 		};
 		return renderReport("ready", report);
 	} catch (error) {
@@ -283,15 +285,15 @@ export function registerInitTools(pi: ExtensionAPI, ensureEnv: (cwd: string) => 
 		name: "remote_env_init",
 		label: "Remote env init",
 		description:
-			"Prepare this worktree's remote build container and return a report for the agent: resolve the project image (configured image, the worktree's Dockerfile, or an Arch Linux image prepared by a subagent; built once per project and reused by every worktree), recreate the container from it, and run the project's bootstrap command. Call it before the first container_exec in a worktree whose container is not running, and with rebuild=true after dependency changes. Recreating the container ends open container sessions.",
+			`Prepare this worktree's remote build container and return a report for the agent: resolve the project image (configured image, the worktree's Dockerfile, or an Arch Linux image prepared by a subagent and published to ${GENERATED_DOCKERFILE} and ${CONFIG_PATH}; images are cached on the build host per Dockerfile content), recreate the container from it, and run the project's bootstrap command. Call it before the first container_exec in a worktree whose container is not running, and after dependency changes. Recreating the container ends open container sessions.`,
 		parameters: initSchema,
 		async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
 			const params = initSchema.parse(rawParams);
 			if (ctx.agent.name === PREPARER_AGENT_NAME) {
 				throw new Error("remote_env_init is not available to the preparer; use remote_env_build_image");
 			}
-			const env = await ensureEnv(ctx.cwd);
-			const report = await initEnvironment(pi, ctx, env, params.rebuild ?? false, signal);
+			const mode: InitMode = params.rebuild === "image" ? "rebuild-image" : params.rebuild === "prepare" ? "reprepare" : "reuse";
+			const report = await initEnvironment(pi, ctx, await ensureEnv(ctx.cwd), mode, signal);
 			return { content: [{ type: "text", text: report }], details: { report } };
 		},
 	});
@@ -300,41 +302,33 @@ export function registerInitTools(pi: ExtensionAPI, ensureEnv: (cwd: string) => 
 		name: "remote_env_build_image",
 		label: "Remote env build image",
 		description:
-			"Preparer-only: build the project image from a Dockerfile, recreate this worktree's container from it, and run the bootstrap command. Returns the build and bootstrap output.",
+			"Preparer-only: build a candidate project image from a Dockerfile, recreate this worktree's container from it, and run the bootstrap command. The last successful candidate is published to the worktree when the preparer reports result: success. Returns the build and bootstrap output.",
 		parameters: buildSchema,
 		async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
 			const params = buildSchema.parse(rawParams);
 			if (ctx.agent.name !== PREPARER_AGENT_NAME) {
 				throw new Error("remote_env_build_image is only available to the remote-env-preparer agent; call remote_env_init");
 			}
-			const env = await ensureEnv(ctx.cwd);
-			if (env.config.imageSource.kind === "configured") {
-				throw new Error(`${CONFIG_PATH} names an image; remote_env_build_image only builds generated project images`);
+			const env = await liveEnv(await ensureEnv(ctx.cwd));
+			const source = env.config.imageSource;
+			if (source.kind === "configured" || (source.kind === "dockerfile" && source.path !== GENERATED_DOCKERFILE)) {
+				throw new Error(`${CONFIG_PATH} names an image or a hand-written Dockerfile; there is nothing to prepare`);
 			}
-			if (finalStageBase(params.dockerfile) !== BASE_IMAGE) throw new Error(`final stage must be FROM ${BASE_IMAGE}`);
+			const dockerfile = params.dockerfile.endsWith("\n") ? params.dockerfile : `${params.dockerfile}\n`;
+			if (stageBases(dockerfile).at(-1) !== BASE_IMAGE) throw new Error(`final stage must be FROM ${BASE_IMAGE}`);
+			if (/^\s*(?:COPY|ADD)\s/im.test(dockerfile)) throw new Error("the build context is empty: COPY and ADD are not allowed");
 			if (/[\r\n\0]/.test(params.bootstrap)) throw new Error("bootstrap must be a single line");
-			const pid = projectIdFor(await mainCheckout(env.root));
-			const image = projectImage(pid);
-			const dir = projectDir(env.host, pid);
-			await writeRemoteFile(env.host, `${dir}/Dockerfile`, params.dockerfile);
-			const build = await buildImage(
-				env.host,
-				{ name: `rb-build-project-${pid}`, image, contextPath: dir, dockerfile: "Dockerfile" },
-				{ timeoutMs: BUILD_TIMEOUT_MS, signal },
-			);
-			const lines = [
-				`image: ${image} ${build.exitCode === 0 ? "built" : `build failed (exit ${build.exitCode})`}`,
-				tailBlock("build_output_tail", build.output),
-			];
-			if (build.exitCode !== 0) throw new Error(lines.join("\n"));
 			const bootstrap = params.bootstrap.trim() || null;
-			await writeRecord(env.host, pid, {
-				image,
-				source: { kind: "generated", sha256: sha256(params.dockerfile) },
-				bootstrap,
-				builtAt: new Date().toISOString(),
-				preparerReport: null,
-			});
+			const pid = projectIdFor(await mainCheckout(env.root));
+			const image = projectImage(pid, sha256(dockerfile));
+			const dir = prepareDir(env.host, env.id);
+			await writeRemoteFile(env.host, `${dir}/build/Dockerfile`, dockerfile);
+			const build = await buildProjectImage(env.host, env.id, image, { contextPath: `${dir}/build`, dockerfile: "Dockerfile", text: dockerfile }, signal);
+			const lines = [
+				`image: ${image} ${build.result.exitCode === 0 ? "built" : `build failed (exit ${build.result.exitCode})`}`,
+				tailBlock("build_output_tail", build.result.output),
+			];
+			if (build.result.exitCode !== 0) throw new Error(lines.join("\n"));
 			const boot = await deployAndBootstrap(env, image, bootstrap, signal);
 			lines.push(`container: ${env.container} recreated from ${image}; earlier container sessions have ended`);
 			if (boot === null) {
@@ -343,6 +337,9 @@ export function registerInitTools(pi: ExtensionAPI, ensureEnv: (cwd: string) => 
 				lines.push(`bootstrap: ${bootstrap} exit ${boot.exitCode}`, tailBlock("bootstrap_output_tail", boot.output));
 				if (boot.exitCode !== 0) throw new Error(lines.join("\n"));
 			}
+			await writeRemoteFile(env.host, `${dir}/Dockerfile`, dockerfile);
+			await writeRemoteFile(env.host, `${dir}/bootstrap`, bootstrap ?? "");
+			lines.push(`candidate: this Dockerfile and bootstrap are published to ${GENERATED_DOCKERFILE} and ${CONFIG_PATH} when you finish with result: success`);
 			const text = lines.join("\n");
 			return { content: [{ type: "text", text }], details: { report: text } };
 		},

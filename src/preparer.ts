@@ -8,7 +8,7 @@ export const PREPARER_AGENT_NAME = "remote-env-preparer";
 
 const PREPARER_PROMPT = `You prepare a reusable build/test environment image for one software project. The project's files are on the local disk; inspect them with read, grep and glob and never modify them. They are mirrored one-way into a remote Docker container and mounted at its working directory. Run commands in that container with container_exec and container_write_stdin.
 
-Goal: a project-level image that holds every dependency needed to build, test and run the project, and none of its code; the code always comes from the mount. Every worktree of the project reuses the image.
+Goal: a project-level image that holds every dependency needed to build, test and run the project, and none of its code; the code always comes from the mount. When you finish with result: success, the plugin publishes your last successful Dockerfile and bootstrap command into the project (.omp/remote-build.Dockerfile and the dockerfile and bootstrap fields of .omp/remote-build.json) and your final answer to .omp/remote-build.preparer.md. Every worktree and build host with these files reuses or rebuilds the image from them without preparing again. Do not write these files yourself.
 
 Image rules
 1. The final stage of your Dockerfile must start with \`FROM rb-base-archlinux:latest\`: Arch Linux with base-devel, git, sudo and paru. The user \`builder\` has passwordless sudo and exists only to build AUR packages; the container runs as root.
@@ -22,9 +22,9 @@ Image rules
 Workflow
 1. Read the project: README and contributing docs, manifests and lockfiles, toolchain pins (rust-toolchain, .nvmrc, .python-version, go.mod, .tool-versions), CI workflows, Makefile or justfile. Determine the build, test and run commands.
 2. The container currently runs rb-base-archlinux:latest. Try installs and commands there with container_exec; nothing there persists.
-3. Call remote_env_build_image with the complete Dockerfile and the bootstrap command. It builds the image, recreates the container from it, runs the bootstrap command and returns the output. On failure, fix and call it again.
+3. Call remote_env_build_image with the complete Dockerfile and the bootstrap command. It builds a candidate image, recreates the container from it, runs the bootstrap command and returns the output. On failure, fix and call it again.
 4. After a successful call, open a new container_exec session (earlier sessions ended when the container was recreated). Run the project's build, then its tests or main run command, and read every exit code with \`echo $?\`. If something is missing, change the Dockerfile or bootstrap and call remote_env_build_image again.
-5. You are done only when, in the container created by your last successful remote_env_build_image call, the build and the tests (or the main run command when there are no tests) exit 0. If a command cannot pass for a reason outside the environment (secrets, external services, tests failing in the code itself), stop and report the exact reason with its output.
+5. You are done only when, in the container created by your last successful remote_env_build_image call, the build and the tests (or the main run command when there are no tests) exit 0; only then report result: success. Any other result publishes nothing. If a command cannot pass for a reason outside the environment (secrets, external services, tests failing in the code itself), stop and report the exact reason with its output.
 
 Final answer
 Another agent reads your final answer. Use exactly these lines:
@@ -46,7 +46,6 @@ export async function runPreparer(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	env: PreparedEnv,
-	image: string,
 	signal: AbortSignal | undefined,
 ): Promise<string> {
 	const envNames = Object.keys(env.config.env);
@@ -55,7 +54,6 @@ export async function runPreparer(
 		`- Container: ${env.container} on the remote build host; working directory ${env.config.workdir}; shell ${env.config.shell}; it currently runs ${BASE_IMAGE}.`,
 		`- Container environment variables from the project config: ${envNames.length > 0 ? envNames.join(", ") : "none"}.`,
 		`- Extra volumes: ${env.config.volumes.length > 0 ? env.config.volumes.join(", ") : "none"}.`,
-		`- remote_env_build_image produces ${image}.`,
 	].join("\n");
 	const result = await pi.pi.runSubprocess({
 		cwd: env.root,

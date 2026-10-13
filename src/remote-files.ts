@@ -21,3 +21,8 @@ export async function readRemoteFile(host: HostConfig, path: string): Promise<st
 	if (result.code !== 0) throw new Error(`cannot read ${host.ssh}:${path}: ${result.stderr.trim()}`);
 	return result.stdout;
 }
+
+/** Removes absolute `path` on the build host recursively; only for directories the ssh user itself wrote. */
+export async function removeRemoteDir(host: HostConfig, path: string): Promise<void> {
+	await run(["ssh", host.ssh, `rm -rf ${shQuote(path)}`]);
+}

@@ -33,8 +33,7 @@ const NON_WRITING_TOOLS: Record<string, true> = {
 	container_write_stdin: true,
 	container_list_sessions: true,
 	container_kill_session: true,
-	// Both flush the replica themselves and never write local files.
-	remote_env_init: true,
+	// Builds candidates on the build host only; never writes local files.
 	remote_env_build_image: true,
 };
 

@@ -30,8 +30,8 @@ export interface HostConfig {
 /**
  * Where the project image comes from.
  * `configured`: a ready image named in the config; deployed automatically.
- * `dockerfile`: a repo-relative Dockerfile named in the config, built by `remote_env_init`.
- * `detect`: `remote_env_init` probes for a Dockerfile, else a subagent prepares one.
+ * `dockerfile`: a repo-relative Dockerfile named in the config (a prepared image publishes `.omp/remote-build.Dockerfile` here), built by `remote_env_init`.
+ * `detect`: `remote_env_init` probes for a Dockerfile, else a subagent prepares one and publishes it.
  */
 export type ImageSource =
 	| { readonly kind: "configured"; readonly image: string }
@@ -69,20 +69,12 @@ export type EnvId = string & { readonly __brand: "EnvId" };
 /** Stable identity of one project (all worktrees of one repository); derived from the absolute main checkout root. */
 export type ProjectId = string & { readonly __brand: "ProjectId" };
 
-/** How the stored project image was produced. */
-export type ProjectImageSource =
-	| { readonly kind: "dockerfile"; readonly path: string; readonly sha256: string }
-	| { readonly kind: "generated"; readonly sha256: string };
-
-/** `<remoteRoot>/projects/<ProjectId>/project.json`: the project image shared by every worktree. */
-export interface ProjectRecord {
-	readonly image: string;
-	readonly source: ProjectImageSource;
-	readonly bootstrap: string | null;
-	/** ISO 8601. */
-	readonly builtAt: string;
-	/** Final answer of the preparer subagent that produced the image, verbatim. */
-	readonly preparerReport: string | null;
+/** A worktree Dockerfile and its content hash, which keys the project image tag. */
+export interface DockerfileRef {
+	/** Repo-relative path. */
+	readonly path: string;
+	readonly sha256: string;
+	readonly text: string;
 }
 
 /** Everything needed to reach one environment once it is prepared. */
