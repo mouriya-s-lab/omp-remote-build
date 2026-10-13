@@ -232,7 +232,7 @@ The container runs `sleep infinity` with restart policy `unless-stopped`. All wo
 |`container_list_sessions`|List this environment's PTY sessions, including ended ones whose final output has not been polled.|
 |`container_kill_session`|Terminate the local `km` client (SIGTERM, then SIGKILL after 2 s). This does not stop the container, and the remote shell may outlive it; prefer sending `exit\n`.|
 
-`km exec` itself always exits 0, so the transport's exit code says nothing about your command. Read command results from the shell, for example `cargo test; echo $?`. Output is sanitized and truncated to omp's default tail limits; the full transcript is kept in the session's `log_path`. Sessions are scoped to the environment of the current cwd, and all of them are closed when the omp session shuts down.
+`km exec` itself always exits 0, so the transport's exit code says nothing about your command. Read command results from the shell, for example `cargo test; echo $?`. Each result shows the rendered terminal: lines that scrolled off since the previous call, then the current screen; `(screen unchanged since the last call)` when nothing changed. Output is sanitized and truncated to omp's default tail limits; the full transcript is kept in the session's `log_path`. Sessions are scoped to the environment of the current cwd, and all of them are closed when the omp session shuts down.
 
 ## Cleanup
 

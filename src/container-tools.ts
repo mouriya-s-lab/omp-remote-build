@@ -1,5 +1,6 @@
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateTail, z } from "@oh-my-pi/pi-coding-agent";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { CollectResult } from "omp-unified-exec/src/collect.ts";
 import { startRateLimitedStream, waitForExitOrDeadline } from "omp-unified-exec/src/long-wait.ts";
 import { sanitizeOutputText } from "omp-unified-exec/src/output-safety.ts";
 import { getPtyLoadError, isPtyAvailable } from "omp-unified-exec/src/pty.ts";
@@ -50,8 +51,38 @@ function transportState(session: ExecSession): TransportState {
 		: { status: "running" };
 }
 
-function sessionResult(session: ExecSession, bytes: Uint8Array, omittedBytes = 0): AgentToolResult<SessionDetails> {
-	const truncated = truncateTail(sanitizeOutputText(decoder.decode(bytes)), { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES });
+/** What one tool result shows of the session's output. */
+interface Observed {
+	readonly text: string;
+	/** Pipe bytes dropped by the retention cap; always 0 for tty screens. */
+	readonly omittedBytes: number;
+	/** `unchanged`: the tty screen is exactly as last reported. */
+	readonly screen: "changed" | "unchanged";
+	/** Scrolled-off rows were evicted from the emulator history before being reported; they are only in the log. */
+	readonly historyMayBeTruncated: boolean;
+}
+
+function observed(collected: CollectResult): Observed {
+	switch (collected.kind) {
+		case "stream":
+			return { text: decoder.decode(collected.bytes), omittedBytes: collected.omittedBytes, screen: "changed", historyMayBeTruncated: false };
+		case "screen": {
+			const observation = collected.observation;
+			return observation.kind === "rendered"
+				? { text: observation.text, omittedBytes: 0, screen: "changed", historyMayBeTruncated: observation.historyMayBeTruncated }
+				: { text: "", omittedBytes: 0, screen: "unchanged", historyMayBeTruncated: false };
+		}
+	}
+}
+
+function liveObserved(session: ExecSession): Observed {
+	const live = session.liveOutput();
+	const text = live.kind === "screen" ? live.snapshot.text : decoder.decode(live.bytes);
+	return { text, omittedBytes: 0, screen: "changed", historyMayBeTruncated: false };
+}
+
+function sessionResult(session: ExecSession, seen: Observed): AgentToolResult<SessionDetails> {
+	const truncated = truncateTail(sanitizeOutputText(seen.text), { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES });
 	const details: SessionDetails = {
 		session_id: session.id,
 		transport: transportState(session),
@@ -60,7 +91,7 @@ function sessionResult(session: ExecSession, bytes: Uint8Array, omittedBytes = 0
 		cwd: session.cwd,
 		command: sanitizeOutputText(session.displayCommand),
 		output_bytes_total: session.totalBytesSeen,
-		omitted_bytes: omittedBytes,
+		omitted_bytes: seen.omittedBytes,
 		truncated: truncated.truncated === true,
 		failure_message: session.failureMessage,
 		note: EXIT_NOTE,
@@ -74,7 +105,8 @@ function sessionResult(session: ExecSession, bytes: Uint8Array, omittedBytes = 0
 		lines.push(`km_exit_code: ${details.transport.km_exit_code}`, `signal: ${details.transport.signal ?? "none"}`);
 	}
 	if (session.failureMessage) lines.push(`failure: ${sanitizeOutputText(session.failureMessage)}`);
-	lines.push("---", details.output || "(no output)");
+	if (seen.historyMayBeTruncated) lines.push(`history: older scrolled-off lines are only in ${session.logPath}`);
+	lines.push("---", details.output || (seen.screen === "unchanged" ? "(screen unchanged since the last call)" : "(no output)"));
 	if (truncated.truncated) lines.push(`\n[Output truncated to the last ${DEFAULT_MAX_LINES} lines / ${DEFAULT_MAX_BYTES} bytes. Full output: ${session.logPath}]`);
 	return { content: [{ type: "text", text: lines.join("\n") }], details };
 }
@@ -89,11 +121,10 @@ async function collectSession(
 	const stream = onUpdate ? startRateLimitedStream({
 		outputNotify: session.outputNotify,
 		minIntervalMs: 250,
-		emit: () => onUpdate(sessionResult(session, session.snapshotStreamTail())),
+		emit: () => onUpdate(sessionResult(session, liveObserved(session))),
 	}) : undefined;
 	try {
-		const collected = await session.collect({ deadlineMs: Date.now() + yieldMs, externalAbort: signal });
-		return sessionResult(session, collected.bytes, collected.omittedBytes);
+		return sessionResult(session, observed(await session.collect({ deadlineMs: Date.now() + yieldMs, externalAbort: signal })));
 	} finally {
 		stream?.stop();
 	}
