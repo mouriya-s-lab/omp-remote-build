@@ -12,7 +12,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mouriya-s-lab/omp-remote-build.git"
+    "url": "git+https://github.com/oh-my-omp/omp-remote-build.git"
   },
   "type": "module",
   "omp": {
@@ -31,7 +31,7 @@
   "devDependencies": {
     "@oh-my-pi/pi-coding-agent": "18.6.1",
     "@types/bun": "latest",
-    "omp-unified-exec": "github:mouriya-s-lab/omp-unified-exec",
+    "omp-unified-exec": "github:oh-my-omp/omp-unified-exec",
     "typescript": "^5.7.3"
   }
 }

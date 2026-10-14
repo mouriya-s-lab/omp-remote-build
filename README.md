@@ -1,5 +1,7 @@
 # omp-remote-build
 
+English | [简体中文](README.zh-CN.md)
+
 An [Oh My Pi (`omp`)](https://github.com/can1357/oh-my-pi) plugin that gives every git worktree its own build/test environment on a remote Docker host:
 
 - a **Mutagen one-way-replica** session mirrors the local worktree to the build host;
@@ -121,8 +123,8 @@ The ignore set is fixed when the Mutagen session is created. After changing igno
 |Component|Notes|
 |---|---|
 |`omp`|Plugins are loaded from `~/.omp/plugins`. Developed against `@oh-my-pi/pi-coding-agent` 18.6.|
-|[`omp-unified-exec`](https://github.com/mouriya-s-lab/omp-unified-exec)|Installed as an omp plugin. The container tools reuse its PTY session, output buffering and escape decoding, imported as `omp-unified-exec/src/*`, so the package must be installed under that name next to this plugin.|
-|A working PTY provider|`omp-unified-exec` loads `@homebridge/node-pty-prebuilt-multiarch`. If no prebuilt binary matches your Bun runtime's ABI, `container_exec` reports `Container PTY unavailable` with the loader error. You then need a native build or shim that makes the module loadable under Bun. The rest of the plugin still works.|
+|[`omp-unified-exec`](https://github.com/oh-my-omp/omp-unified-exec)|Installed as an omp plugin. The container tools reuse its PTY session, output buffering and escape decoding, imported as `omp-unified-exec/src/*`, so the package must be installed under that name next to this plugin.|
+|A working PTY provider|Under omp (a compiled Bun executable), `omp-unified-exec` uses Bun's native `Bun.Terminal`, available from Bun 1.4. If the runtime has no supported PTY backend, `container_exec` reports `Container PTY unavailable` with the load error; the rest of the plugin still works.|
 |[Mutagen](https://mutagen.io)|`mutagen` CLI locally. Its daemon starts on demand. It reaches the build host over SSH and installs its agent there automatically.|
 |SSH|Non-interactive key-based access to the build host (`ssh -o BatchMode=yes <host> true` must succeed).|
 |[Komodo](https://komo.do) Core + Periphery|Core reachable from the local machine. The build host is registered as a Komodo **Server**, with Periphery running and a Docker daemon available. Developed against Komodo v2.2.|
@@ -135,8 +137,8 @@ The ignore set is fixed when the Mutagen session is created. After changing igno
 ## Install
 
 ```bash
-omp install https://github.com/mouriya-s-lab/omp-unified-exec   # dependency, once
-omp install https://github.com/mouriya-s-lab/omp-remote-build
+omp install https://github.com/oh-my-omp/omp-unified-exec   # dependency, once
+omp install https://github.com/oh-my-omp/omp-remote-build
 ```
 
 GitHub installs track the default branch; re-run the same `omp install <url>` to update. Restart `omp` after installing or updating.
@@ -271,7 +273,7 @@ Named volumes listed in `volumes` are shared between environments and are not ti
 - The flush after every non-read tool call adds a sync round-trip to each such call.
 - The Mutagen ignore set is fixed at session creation.
 - No automatic teardown (see [Cleanup](#cleanup)).
-- `container_*` tools need a loadable PTY provider in the omp runtime.
+- `container_*` tools need a PTY backend in the omp runtime (`Bun.Terminal`, Bun 1.4+).
 - Every `remote_env_init` recreates the container, which ends open container sessions and discards anything written in the container outside the mount.
 - Images are keyed by Dockerfile content only. A Dockerfile that `COPY`s changing build-context files, or whose `RUN` steps fetch moving upstream packages, needs `rebuild: "image"` to pick those changes up.
 - Image pruning on the build host can remove a project image between sessions; the next `remote_env_init` rebuilds it, which takes a build's time. The base image is rebuilt the same way, so a change to [`images/archlinux.Dockerfile`](images/archlinux.Dockerfile) reaches the build host once the old image is pruned or removed.

@@ -7,7 +7,7 @@
       "devDependencies": {
         "@oh-my-pi/pi-coding-agent": "18.6.1",
         "@types/bun": "latest",
-        "omp-unified-exec": "github:mouriya-s-lab/omp-unified-exec",
+        "omp-unified-exec": "github:oh-my-omp/omp-unified-exec",
         "typescript": "^5.7.3",
       },
       "peerDependencies": {
@@ -495,7 +495,7 @@
 
     "object-keys": ["object-keys@1.1.1", "", {}, "sha512-NuAESUOUMrlIXOfHKzD6bpPu3tYt3xvjNdRIQ+FeT0lNb4K8WR70CaDxhuNguS2XG+GjkyMwOzsN5ZktImfhLA=="],
 
-    "omp-unified-exec": ["omp-unified-exec@github:mouriya-s-lab/omp-unified-exec#597a10e", { "dependencies": { "@xterm/headless": "^6.0.0" }, "optionalDependencies": { "@homebridge/node-pty-prebuilt-multiarch": "^0.14.1" }, "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.99.1", "@earendil-works/pi-tui": ">=0.99.1", "typebox": "*" } }, "mouriya-s-lab-omp-unified-exec-597a10e", "sha512-Yp+r8e4CfUFQtmg9Gedy+VErMbfXXV/r6pGwrpxv4GEmmf66OvMMO6TA2OEEKaLqCvoxDTkhoFKDkmO6/NtWJg=="],
+    "omp-unified-exec": ["omp-unified-exec@github:oh-my-omp/omp-unified-exec#ea69210", { "dependencies": { "@xterm/headless": "^6.0.0" }, "optionalDependencies": { "@homebridge/node-pty-prebuilt-multiarch": "^0.14.1" }, "peerDependencies": { "@earendil-works/pi-coding-agent": ">=0.99.1", "@earendil-works/pi-tui": ">=0.99.1", "typebox": "*" } }, "oh-my-omp-omp-unified-exec-ea69210", "sha512-yAfBVUh4RqawfrGIujALwEYB7XquGwzjQhjKodidZG9NadblHYuo3+sfJV6aGPzUATeDHUDMadU7pVNc+CWpTg=="],
 
     "once": ["once@1.4.0", "", { "dependencies": { "wrappy": "1" } }, "sha512-lNaJgI+2Q5URQBkccEKHTQOPaXdUxnZZElQTZY0MFUAuaEqe1E+Nyvgdz/aIyNi6Z9MzO5dv1H8n58/GELp3+w=="],
 
