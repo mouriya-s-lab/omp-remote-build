@@ -123,8 +123,8 @@ The ignore set is fixed when the Mutagen session is created. After changing igno
 |Component|Notes|
 |---|---|
 |`omp`|Plugins are loaded from `~/.omp/plugins`. Developed against `@oh-my-pi/pi-coding-agent` 18.6.|
-|[`omp-unified-exec`](https://github.com/oh-my-omp/omp-unified-exec)|Installed as an omp plugin. The container tools reuse its PTY session, output buffering and escape decoding, imported as `omp-unified-exec/src/*`, so the package must be installed under that name next to this plugin.|
-|A working PTY provider|Under omp (a compiled Bun executable), `omp-unified-exec` uses Bun's native `Bun.Terminal`, available from Bun 1.4. If the runtime has no supported PTY backend, `container_exec` reports `Container PTY unavailable` with the load error; the rest of the plugin still works.|
+|[`omp-unified-exec`](https://github.com/oh-my-omp/omp-unified-exec)|Installed as an omp plugin. The container tools reuse its current `ExecSession` API, rendered terminal observations and escape decoding, imported as `omp-unified-exec/src/*`, so the package must be installed under that name next to this plugin.|
+|A working PTY provider|The omp host must provide Bun's native `Bun.Terminal`. Before checking or opening a container terminal, `container_exec` calls `omp-unified-exec`'s runtime admission check. If the host lacks that capability, it reports `Container PTY unavailable` with the runtime requirement; the rest of the plugin still works.|
 |[Mutagen](https://mutagen.io)|`mutagen` CLI locally. Its daemon starts on demand. It reaches the build host over SSH and installs its agent there automatically.|
 |SSH|Non-interactive key-based access to the build host (`ssh -o BatchMode=yes <host> true` must succeed).|
 |[Komodo](https://komo.do) Core + Periphery|Core reachable from the local machine. The build host is registered as a Komodo **Server**, with Periphery running and a Docker daemon available. Developed against Komodo v2.2.|
@@ -242,7 +242,7 @@ The container runs `sleep infinity` with restart policy `unless-stopped`. All wo
 |`container_list_sessions`|List this environment's PTY sessions, including ended ones whose final output has not been polled.|
 |`container_kill_session`|Terminate the local `km` client (SIGTERM, then SIGKILL after 2 s). This does not stop the container, and the remote shell may outlive it; prefer sending `exit\n`.|
 
-`km exec` itself always exits 0, so the transport's exit code says nothing about your command. Read command results from the shell, for example `cargo test; echo $?`. Each result shows the rendered terminal: lines that scrolled off since the previous call, then the current screen; `(screen unchanged since the last call)` when nothing changed. Output is sanitized and truncated to omp's default tail limits; the full transcript is kept in the session's `log_path`. Sessions are scoped to the environment of the current cwd, and all of them are closed when the omp session shuts down.
+`km exec` itself always exits 0, so the transport's exit code says nothing about your command. Read command results from the shell, for example `cargo test; echo $?`. While a session is running, each result shows the rendered terminal: lines that scrolled off since the previous call, then the current screen; `(screen unchanged since the last call)` when nothing changed. An ended session returns its immutable final active screen. Live updates read non-consuming screen snapshots after output has been parsed, throttled to one update per 250 ms with a trailing update while the call remains attached. Output is sanitized and truncated to omp's default tail limits; the full transcript is kept in the session's `log_path`. Sessions are scoped to the environment of the current cwd. Polling an ended session's final output or killing it releases its terminal before removing the session; omp shutdown terminates all remaining local transports and releases their live terminals.
 
 ## Cleanup
 
@@ -273,7 +273,7 @@ Named volumes listed in `volumes` are shared between environments and are not ti
 - The flush after every non-read tool call adds a sync round-trip to each such call.
 - The Mutagen ignore set is fixed at session creation.
 - No automatic teardown (see [Cleanup](#cleanup)).
-- `container_*` tools need a PTY backend in the omp runtime (`Bun.Terminal`, Bun 1.4+).
+- `container_*` tools need an omp host that provides native `Bun.Terminal`.
 - Every `remote_env_init` recreates the container, which ends open container sessions and discards anything written in the container outside the mount.
 - Images are keyed by Dockerfile content only. A Dockerfile that `COPY`s changing build-context files, or whose `RUN` steps fetch moving upstream packages, needs `rebuild: "image"` to pick those changes up.
 - Image pruning on the build host can remove a project image between sessions; the next `remote_env_init` rebuilds it, which takes a build's time. The base image is rebuilt the same way, so a change to [`images/archlinux.Dockerfile`](images/archlinux.Dockerfile) reaches the build host once the old image is pruned or removed.
@@ -286,7 +286,7 @@ bun install
 bunx tsc --noEmit -p .
 ```
 
-The `omp-unified-exec` dev dependency gives type-checking, and loading the plugin from this checkout with `omp -e src/index.ts`, the same API and PTY provider as the installed plugin. Run `bun update omp-unified-exec` when the installed copy moves. At runtime an installed plugin uses the copy installed as an omp plugin.
+The `omp-unified-exec` dev dependency provides the API used for type-checking and for loading this checkout with `omp -e src/index.ts`. Run `bun update omp-unified-exec` when that API moves. At runtime an installed plugin uses the copy installed as an omp plugin. When checking against a local unified-exec checkout, temporarily resolve the dev dependency to that checkout, run the type-check, and restore the dependency resolution without committing it.
 
 `src/komodo.ts` is the only container-backend boundary: `komodoReachable`, `ensureContainer`, `runOnce`, `buildImage`, `imageExists`, `containerRunning` and `execArgv`. No other module builds Komodo requests or `km` argv.
 
