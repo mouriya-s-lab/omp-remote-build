@@ -123,8 +123,8 @@ sequenceDiagram
 |组件|说明|
 |---|---|
 |`omp`|插件从 `~/.omp/plugins` 加载。基于 `@oh-my-pi/pi-coding-agent` 18.6 开发。|
-|[`omp-unified-exec`](https://github.com/oh-my-omp/omp-unified-exec)|作为 omp 插件安装。容器工具复用它的 PTY 会话、输出缓冲和转义解码，以 `omp-unified-exec/src/*` 导入，所以必须以这个名字安装在本插件旁边。|
-|可用的 PTY 后端|在 omp（编译后的 Bun 可执行文件）下，`omp-unified-exec` 使用 Bun 原生的 `Bun.Terminal`，Bun 1.4 起可用。运行时没有受支持的 PTY 后端时，`container_exec` 报告 `Container PTY unavailable` 及加载错误；插件的其余部分照常工作。|
+|[`omp-unified-exec`](https://github.com/oh-my-omp/omp-unified-exec)|作为 omp 插件安装。容器工具复用它当前的 `ExecSession` API、渲染后的终端观察和转义解码，以 `omp-unified-exec/src/*` 导入，所以必须以这个名字安装在本插件旁边。|
+|可用的 PTY 后端|omp 宿主必须提供 Bun 原生的 `Bun.Terminal`。`container_exec` 在检查或打开容器终端之前调用 `omp-unified-exec` 的运行时准入检查；宿主缺少该能力时，报告 `Container PTY unavailable` 及运行时要求，插件的其余部分照常工作。|
 |[Mutagen](https://mutagen.io)|本地有 `mutagen` CLI。它的守护进程按需启动，通过 SSH 连到构建主机并自动在那里安装 agent。|
 |SSH|对构建主机有非交互、基于密钥的访问（`ssh -o BatchMode=yes <host> true` 必须成功）。|
 |[Komodo](https://komo.do) Core + Periphery|本地机器能访问 Core。构建主机注册为 Komodo **Server**，运行着 Periphery，并有可用的 Docker 守护进程。基于 Komodo v2.2 开发。|
@@ -242,7 +242,7 @@ secret = "S-..."
 |`container_list_sessions`|列出本环境的 PTY 会话，包括最终输出尚未被轮询的已结束会话。|
 |`container_kill_session`|终止本地 `km` 客户端（SIGTERM，2 s 后 SIGKILL）。这不会停止容器，远端 shell 可能比它活得久；优先发送 `exit\n`。|
 
-`km exec` 本身总是以 0 退出，所以传输层的退出码不能说明你的命令结果。请从 shell 里读取命令结果，例如 `cargo test; echo $?`。每个结果显示渲染后的终端：自上次调用以来滚出屏幕的行，然后是当前屏幕；没有变化时显示 `(screen unchanged since the last call)`。输出经过净化，并按 omp 默认的尾部限制截断；完整记录保存在会话的 `log_path`。会话限定在当前 cwd 的环境内，omp 会话关闭时全部关闭。
+`km exec` 本身总是以 0 退出，所以传输层的退出码不能说明你的命令结果。请从 shell 里读取命令结果，例如 `cargo test; echo $?`。会话运行时，每个结果显示渲染后的终端：自上次调用以来滚出屏幕的行，然后是当前屏幕；没有变化时显示 `(screen unchanged since the last call)`。已结束的会话返回不可变的最终活动屏幕。实时更新在输出解析后读取不消费轮询观察的屏幕快照，以 250 ms 节流，并在调用仍附着期间补发尾次更新。输出经过净化，并按 omp 默认的尾部限制截断；完整记录保存在会话的 `log_path`。会话限定在当前 cwd 的环境内。轮询已结束会话的最终输出或终止会话时，先释放终端再移除会话；omp 关闭时终止所有剩余的本地传输并释放其活动终端。
 
 ## 清理
 
@@ -273,7 +273,7 @@ ssh <host> docker run --rm -v <remoteRoot>:/rb archlinux:latest rm -rf /rb/<id>
 - 每次非只读工具调用后的 flush 都会给该调用增加一次同步往返。
 - Mutagen 忽略集合在会话创建时固定。
 - 没有自动拆除（见[清理](#清理)）。
-- `container_*` 工具需要 omp 运行时里有 PTY 后端（`Bun.Terminal`，Bun 1.4+）。
+- `container_*` 工具需要 omp 宿主提供原生 `Bun.Terminal`。
 - 每次 `remote_env_init` 都会重建容器，这会结束已打开的容器会话，并丢弃容器里写在挂载目录之外的内容。
 - 镜像只以 Dockerfile 内容为键。会 `COPY` 变化中的构建上下文文件，或其 `RUN` 步骤拉取不断更新的上游软件包的 Dockerfile，需要 `rebuild: "image"` 才能拿到这些变化。
 - 构建主机的镜像清理可能在两次会话之间删除项目镜像；下一次 `remote_env_init` 会重建它，需要一次构建的时间。基础镜像也以同样方式重建，所以对 [`images/archlinux.Dockerfile`](images/archlinux.Dockerfile) 的修改要等旧镜像被清理或删除后才会到达构建主机。
@@ -286,7 +286,7 @@ bun install
 bunx tsc --noEmit -p .
 ```
 
-开发依赖 `omp-unified-exec` 让类型检查，以及用 `omp -e src/index.ts` 从本检出加载插件时，得到与已安装插件相同的 API 和 PTY 后端。已安装的副本更新后执行 `bun update omp-unified-exec`。运行时，已安装的插件使用作为 omp 插件安装的那份副本。
+开发依赖 `omp-unified-exec` 提供类型检查和用 `omp -e src/index.ts` 从本检出加载插件时使用的 API。该 API 更新后执行 `bun update omp-unified-exec`。运行时，已安装的插件使用作为 omp 插件安装的那份副本。要针对本地 unified-exec 检出做检查时，临时让开发依赖解析到该检出，完成类型检查后恢复依赖解析，不提交此临时改动。
 
 `src/komodo.ts` 是唯一的容器后端边界：`komodoReachable`、`ensureContainer`、`runOnce`、`buildImage`、`imageExists`、`containerRunning` 和 `execArgv`。其他模块都不构造 Komodo 请求或 `km` argv。
 

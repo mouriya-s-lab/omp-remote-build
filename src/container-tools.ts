@@ -1,9 +1,9 @@
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateTail, z } from "@oh-my-pi/pi-coding-agent";
 import type { AgentToolResult, AgentToolUpdateCallback, ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { CollectResult } from "omp-unified-exec/src/collect.ts";
-import { startRateLimitedStream, waitForExitOrDeadline } from "omp-unified-exec/src/long-wait.ts";
+import { waitForExitOrDeadline } from "omp-unified-exec/src/long-wait.ts";
 import { sanitizeOutputText } from "omp-unified-exec/src/output-safety.ts";
-import { getPtyLoadError, isPtyAvailable } from "omp-unified-exec/src/pty.ts";
+import { requireBunRuntime } from "omp-unified-exec/src/pty.ts";
 import { ExecSession } from "omp-unified-exec/src/session.ts";
 import { SessionStore } from "omp-unified-exec/src/session-store.ts";
 import { unescapeChars } from "omp-unified-exec/src/unescape.ts";
@@ -11,7 +11,6 @@ import { containerRunning, execArgv } from "./komodo.ts";
 import type { PreparedEnv } from "./types.ts";
 
 const EXIT_NOTE = "km always exits 0; this is only the local transport's exit code. Read command exit codes from the container shell output, e.g. echo $? immediately after the command.";
-const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 const yieldSchema = z.number().int().min(250).max(30_000).optional().describe("Attachment window in milliseconds, not a command timeout; 250–30000.");
 const sessionIdSchema = z.number().int().positive().describe("Session ID returned by container_exec, scoped to the current environment.");
@@ -54,7 +53,7 @@ function transportState(session: ExecSession): TransportState {
 /** What one tool result shows of the session's output. */
 interface Observed {
 	readonly text: string;
-	/** Pipe bytes dropped by the retention cap; always 0 for tty screens. */
+	/** Always 0 for terminal screens; retained in the container tool result shape. */
 	readonly omittedBytes: number;
 	/** `unchanged`: the tty screen is exactly as last reported. */
 	readonly screen: "changed" | "unchanged";
@@ -64,21 +63,31 @@ interface Observed {
 
 function observed(collected: CollectResult): Observed {
 	switch (collected.kind) {
-		case "stream":
-			return { text: decoder.decode(collected.bytes), omittedBytes: collected.omittedBytes, screen: "changed", historyMayBeTruncated: false };
+		case "none":
+			return { text: "", omittedBytes: 0, screen: "changed", historyMayBeTruncated: false };
 		case "screen": {
 			const observation = collected.observation;
 			return observation.kind === "rendered"
 				? { text: observation.text, omittedBytes: 0, screen: "changed", historyMayBeTruncated: observation.historyMayBeTruncated }
 				: { text: "", omittedBytes: 0, screen: "unchanged", historyMayBeTruncated: false };
 		}
+		case "final-screen":
+			return {
+				text: collected.projection.screenLines.join("\n"),
+				omittedBytes: 0,
+				screen: "changed",
+				historyMayBeTruncated: collected.projection.historyMayBeTruncated,
+			};
 	}
+	return assertNever(collected);
+}
+
+function assertNever(value: never): never {
+	throw new Error(`Unexpected collection result: ${String(value)}`);
 }
 
 function liveObserved(session: ExecSession): Observed {
-	const live = session.liveOutput();
-	const text = live.kind === "screen" ? live.snapshot.text : decoder.decode(live.bytes);
-	return { text, omittedBytes: 0, screen: "changed", historyMayBeTruncated: false };
+	return { text: session.liveSnapshot()?.text ?? "", omittedBytes: 0, screen: "changed", historyMayBeTruncated: false };
 }
 
 function sessionResult(session: ExecSession, seen: Observed): AgentToolResult<SessionDetails> {
@@ -111,6 +120,38 @@ function sessionResult(session: ExecSession, seen: Observed): AgentToolResult<Se
 	return { content: [{ type: "text", text: lines.join("\n") }], details };
 }
 
+/** Stream parsed screen changes without consuming poll observations. */
+function streamScreen(session: ExecSession, onUpdate: AgentToolUpdateCallback<SessionDetails>): { stop(): void } {
+	let lastEmitAt = 0;
+	let timer: NodeJS.Timeout | undefined;
+	const emit = () => {
+		lastEmitAt = Date.now();
+		try {
+			onUpdate(sessionResult(session, liveObserved(session)));
+		} catch {
+			// A transient UI update failure must not interrupt the session.
+		}
+	};
+	const unsubscribe = session.onScreenChange(() => {
+		if (timer !== undefined) return;
+		const remaining = 250 - (Date.now() - lastEmitAt);
+		if (remaining <= 0) {
+			emit();
+		} else {
+			timer = setTimeout(() => {
+				timer = undefined;
+				emit();
+			}, remaining);
+		}
+	});
+	return {
+		stop() {
+			unsubscribe();
+			clearTimeout(timer);
+		},
+	};
+}
+
 async function collectSession(
 	session: ExecSession,
 	yieldMs: number,
@@ -118,11 +159,7 @@ async function collectSession(
 	onUpdate: AgentToolUpdateCallback<SessionDetails> | undefined,
 ): Promise<AgentToolResult<SessionDetails>> {
 	session.touch();
-	const stream = onUpdate ? startRateLimitedStream({
-		outputNotify: session.outputNotify,
-		minIntervalMs: 250,
-		emit: () => onUpdate(sessionResult(session, liveObserved(session))),
-	}) : undefined;
+	const stream = onUpdate ? streamScreen(session, onUpdate) : undefined;
 	try {
 		return sessionResult(session, observed(await session.collect({ deadlineMs: Date.now() + yieldMs, externalAbort: signal })));
 	} finally {
@@ -170,6 +207,7 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 		// Keep ownership until each local transport confirms exit. Killing km may leave the remote shell alive.
 		await Promise.all(store.values().map(async (session) => {
 			await terminateSession(session, "immediate");
+			await session.releaseForShutdown();
 			store.remove(session.id);
 		}));
 	});
@@ -184,7 +222,11 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 			const env = await ensureEnv(ctx.cwd);
 			if (lifecycle === "shutdown") throw new Error("Remote-build session is shutting down; no new container PTYs can be opened.");
 			if (signal?.aborted) throw new Error("Container exec was cancelled before opening the PTY.");
-			if (!isPtyAvailable()) throw new Error(`Container PTY unavailable: ${getPtyLoadError() ?? "native PTY provider failed to load"}. omp-unified-exec's PTY provider must load in this omp runtime; restart omp after fixing it.`);
+			try {
+				requireBunRuntime();
+			} catch (error) {
+				throw new Error(`Container PTY unavailable: ${error instanceof Error ? error.message : String(error)}`);
+			}
 			if (!(await containerRunning(env.host, env.container))) {
 				throw new Error(`Container ${env.container} is not running. Call remote_env_init to prepare this worktree's environment.`);
 			}
@@ -192,7 +234,6 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 				command: execArgv(env.host, env.container, env.config.shell),
 				cwd: env.root,
 				env: process.env,
-				tty: true,
 				cols: 120,
 				rows: 30,
 			});
@@ -214,7 +255,10 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 			const session = getSession(params.session_id, env);
 			sendInput(session, params.chars);
 			const result = await collectSession(session, params.yield_time_ms ?? 250, signal, onUpdate);
-			if (session.hasExited && session.outputClosed.isClosed) store.remove(session.id);
+			if (session.hasExited && session.outputClosed.isClosed) {
+				await session.release();
+				store.remove(session.id);
+			}
 			return result;
 		},
 	});
@@ -254,6 +298,7 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 			const session = getSession(params.session_id, env);
 			await terminateSession(session, "graceful");
 			const result = await collectSession(session, 500, undefined, onUpdate);
+			await session.release();
 			store.remove(session.id);
 			return result;
 		},
