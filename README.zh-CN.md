@@ -145,6 +145,19 @@ omp install https://github.com/oh-my-omp/omp-remote-build
 
 然后创建下文描述的两个配置文件，并重启 `omp`。
 
+## UI 语言
+
+面向用户的标签、状态和通知在 `OMOMP_LANG` 为 `en` 或 `zh`（不区分大小写）时使用该值。否则使用 `LC_ALL`、`LC_MESSAGES`、`LANG` 中第一个非空值（以 `zh` 开头时使用中文，否则使用英文）；都没有时默认为英文。
+
+在 omp 会话中，这个 OMP-only 插件还会在 `OMOMP_LANG` 不是受支持的值时，从 omp agent 目录中唯一的 `omomp.yml`、`omomp.yaml`、`omomp.json` 或 `omomp.toml` 文件读取 `omomp-lang`：
+
+```yaml
+omomp-lang:
+  language: zh
+```
+
+插件在第一次需要该设置时读取文件一次；设置从下一次启动 omp 起生效。
+
 ## 配置
 
 ### 1. 主机配置（每个用户）：`~/.omp/agent/remote-build.json`

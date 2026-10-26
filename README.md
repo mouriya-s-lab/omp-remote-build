@@ -145,6 +145,19 @@ GitHub installs track the default branch; re-run the same `omp install <url>` to
 
 Then create the two config files described below and restart `omp`.
 
+## UI language
+
+Person-facing labels, statuses and notifications use `OMOMP_LANG` when it is `en` or `zh` (case-insensitive). Otherwise, the first non-empty `LC_ALL`, `LC_MESSAGES` or `LANG` is used (`zh` when it starts with `zh`, otherwise `en`), and the default is `en`.
+
+In an omp session, the OMP-only plugin also reads the `omomp-lang` section from the single `omomp.yml`, `omomp.yaml`, `omomp.json` or `omomp.toml` file in omp's agent directory when `OMOMP_LANG` is not set to a supported value:
+
+```yaml
+omomp-lang:
+  language: zh
+```
+
+The file is read once when the plugin first needs the setting. The setting applies from the next omp start.
+
 ## Configuration
 
 ### 1. Host config (per user): `~/.omp/agent/remote-build.json`

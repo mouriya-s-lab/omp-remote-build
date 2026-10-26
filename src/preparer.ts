@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { BASE_IMAGE } from "./project.ts";
 import type { PreparedEnv } from "./types.ts";
+import { tr } from "./i18n.ts";
 
 /** Agent definition name of the preparer subagent; `ctx.agent.name` in its session. */
 export const PREPARER_AGENT_NAME = "remote-env-preparer";
@@ -59,14 +60,14 @@ export async function runPreparer(
 		cwd: env.root,
 		agent: {
 			name: PREPARER_AGENT_NAME,
-			description: "Prepares a reusable project environment image for remote-build",
+			description: tr("Prepares a reusable project environment image for remote-build", "为 remote-build 准备可复用的项目环境镜像"),
 			systemPrompt: PREPARER_PROMPT,
 			tools: ["read", "grep", "glob", "web_search"],
 			source: "bundled",
 		},
 		task,
 		assignment: task,
-		description: "remote-env preparer",
+		description: tr("remote-env preparer", "remote-env 准备器"),
 		index: 0,
 		id: `rb-prep-${env.id}-${Date.now().toString(36)}`,
 		modelOverride: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,

@@ -18,6 +18,7 @@ import {
 } from "./project.ts";
 import { readRemoteFile, removeRemoteDir, writeRemoteFile } from "./remote-files.ts";
 import type { DockerfileRef, ImageSource, OnceResult, PreparedEnv, RemoteBuildConfig } from "./types.ts";
+import { tr } from "./i18n.ts";
 
 const BOOTSTRAP_TIMEOUT_MS = 30 * 60_000;
 
@@ -191,9 +192,9 @@ async function initEnvironment(
 ): Promise<string> {
 	const { host } = prepared;
 	const report: Report = { worktree: { kind: "line", value: prepared.root } };
-	const phase = (name: string) => ctx.ui.setStatus("remote-build", `remote-build: init ${name}`);
+	const phase = (name: string, nameZh: string) => ctx.ui.setStatus("remote-build", tr(`remote-build: init ${name}`, `remote-build：初始化${nameZh}`));
 	try {
-		phase("sync");
+		phase("sync", "同步");
 		await flush(host, prepared.mutagenSession);
 		const mainRoot = await mainCheckout(prepared.root);
 		const pid = projectIdFor(mainRoot);
@@ -216,7 +217,7 @@ async function initEnvironment(
 			case "dockerfile": {
 				let dockerfile: DockerfileRef;
 				if (plan.kind === "prepare") {
-					phase("preparer");
+					phase("preparer", "准备器");
 					report.image_source = { kind: "line", value: "prepared by subagent" };
 					dockerfile = await prepare(pi, ctx, env, report, signal);
 					env = await liveEnv(prepared);
@@ -230,7 +231,7 @@ async function initEnvironment(
 					report.image_source ??= { kind: "line", value: `reused (cached build of ${dockerfile.path})` };
 				} else {
 					report.image_source ??= { kind: "line", value: `built from worktree Dockerfile ${dockerfile.path}` };
-					phase("build");
+					phase("build", "构建");
 					const build = await buildProjectImage(
 						host,
 						env.id,
@@ -260,7 +261,7 @@ async function initEnvironment(
 
 		const bootstrap = env.config.bootstrap;
 		report.bootstrap = { kind: "line", value: bootstrap ?? "none" };
-		phase(bootstrap === null ? "deploy" : "deploy and bootstrap");
+		phase(bootstrap === null ? "deploy" : "deploy and bootstrap", bootstrap === null ? "部署" : "部署并运行 bootstrap");
 		const boot = await deployAndBootstrap(env, image, bootstrap, signal);
 		if (boot !== null) {
 			report.bootstrap_exit_code = { kind: "line", value: String(boot.exitCode) };
@@ -283,7 +284,7 @@ async function initEnvironment(
 export function registerInitTools(pi: ExtensionAPI, ensureEnv: (cwd: string) => Promise<PreparedEnv>): void {
 	pi.registerTool({
 		name: "remote_env_init",
-		label: "Remote env init",
+		label: tr("Remote env init", "远程环境初始化"),
 		description:
 			`Prepare this worktree's remote build container and return a report for the agent: resolve the project image (configured image, the worktree's Dockerfile, or an Arch Linux image prepared by a subagent and published to ${GENERATED_DOCKERFILE} and ${CONFIG_PATH}; images are cached on the build host per Dockerfile content), recreate the container from it, and run the project's bootstrap command. Call it before the first container_exec in a worktree whose container is not running, and after dependency changes. Recreating the container ends open container sessions.`,
 		parameters: initSchema,
@@ -300,7 +301,7 @@ export function registerInitTools(pi: ExtensionAPI, ensureEnv: (cwd: string) => 
 
 	pi.registerTool({
 		name: "remote_env_build_image",
-		label: "Remote env build image",
+		label: tr("Remote env build image", "远程环境构建镜像"),
 		description:
 			"Preparer-only: build a candidate project image from a Dockerfile, recreate this worktree's container from it, and run the bootstrap command. The last successful candidate is published to the worktree when the preparer reports result: success. Returns the build and bootstrap output.",
 		parameters: buildSchema,

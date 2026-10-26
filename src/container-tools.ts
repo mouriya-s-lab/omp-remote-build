@@ -9,6 +9,7 @@ import { SessionStore } from "omp-unified-exec/src/session-store.ts";
 import { unescapeChars } from "omp-unified-exec/src/unescape.ts";
 import { containerRunning, execArgv } from "./komodo.ts";
 import type { PreparedEnv } from "./types.ts";
+import { tr } from "./i18n.ts";
 
 const EXIT_NOTE = "km always exits 0; this is only the local transport's exit code. Read command exit codes from the container shell output, e.g. echo $? immediately after the command.";
 const encoder = new TextEncoder();
@@ -214,7 +215,7 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 
 	pi.registerTool({
 		name: "container_exec",
-		label: "Container exec",
+		label: tr("Container exec", "容器执行"),
 		description: "Open an interactive PTY in the current remote-build container through Komodo, optionally sending initial input. Returns a session ID and output; drive it with container_write_stdin. The container working directory is set by deployment, not this tool. Komodo reuses the terminal named shell per container: reuse an existing session instead of opening competing clients. " + EXIT_NOTE,
 		parameters: execSchema,
 		async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
@@ -246,7 +247,7 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 
 	pi.registerTool({
 		name: "container_write_stdin",
-		label: "Container stdin",
+		label: tr("Container stdin", "容器标准输入"),
 		description: "Send characters (C-style escapes decoded) to a container PTY and/or poll for output. Omit chars for a pure poll. The yield window defaults to 250 ms; cancellation stops waiting without killing the session. " + EXIT_NOTE,
 		parameters: writeSchema,
 		async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
@@ -265,7 +266,7 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 
 	pi.registerTool({
 		name: "container_list_sessions",
-		label: "Container sessions",
+		label: tr("Container sessions", "容器会话"),
 		description: "List container PTY sessions for the current remote-build environment. Ended sessions remain listed until their final output is polled or they are killed. " + EXIT_NOTE,
 		parameters: listSchema,
 		async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
@@ -289,7 +290,7 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 
 	pi.registerTool({
 		name: "container_kill_session",
-		label: "Kill container session",
+		label: tr("Kill container session", "终止容器会话"),
 		description: "Terminate the local km PTY client with SIGTERM, escalating to SIGKILL after two seconds. This does not stop or delete the container; the reused remote shell may remain alive. Prefer sending exit\\n to end the shell itself. " + EXIT_NOTE,
 		parameters: killSchema,
 		async execute(_toolCallId, rawParams, _signal, onUpdate, ctx) {

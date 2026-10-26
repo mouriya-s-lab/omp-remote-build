@@ -1,4 +1,6 @@
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { CONFIG_PATH, loadConfig } from "./config.ts";
 import { registerContainerTools } from "./container-tools.ts";
@@ -7,12 +9,48 @@ import { loadHost } from "./host.ts";
 import { registerInitTools } from "./init.ts";
 import { findSession, flush } from "./mutagen.ts";
 import type { EnvState, PreparedEnv, RemoteBuildConfig } from "./types.ts";
+import { setupI18n, tr } from "./i18n.ts";
 
 /** `/worktree [branch]` and its registered name `/wt`. */
 const WORKTREE_COMMAND = /^\/(?:wt|worktree)(?:\s|$)/;
 
 /** Upper bound for the native command to move the session into the new worktree. */
 const MOVE_TIMEOUT_MS = 10 * 60 * 1000;
+
+const OMOMP_FILENAMES = ["omomp.yml", "omomp.yaml", "omomp.json", "omomp.toml"] as const;
+
+/** Reads the OMP-only `omomp-lang.language` setting without making i18n depend on the host. */
+function readOmompLanguage(agentDir: string): unknown {
+	const paths = OMOMP_FILENAMES.map(filename => ({ filename, path: join(agentDir, filename) }));
+	const existing = paths.filter(({ path }) => {
+		try {
+			return statSync(path).isFile();
+		} catch {
+			return false;
+		}
+	});
+	if (existing.length !== 1) return undefined;
+	const { filename, path } = existing[0]!;
+	try {
+		const text = readFileSync(path, "utf8");
+		const parsed = filename.endsWith(".json")
+			? JSON.parse(text)
+			: filename.endsWith(".toml")
+				? Bun.TOML.parse(text)
+				: Bun.YAML.parse(text);
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+		const section = (parsed as Record<string, unknown>)["omomp-lang"];
+		if (typeof section !== "object" || section === null || Array.isArray(section)) return undefined;
+		return (section as Record<string, unknown>).language;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Registers the OMP-side config reader before any labels or statuses are translated. */
+function setupLanguageReader(): void {
+	setupI18n(() => readOmompLanguage(getAgentDir()));
+}
 
 /**
  * Tools that cannot change files in the worktree. Every other tool call is treated
@@ -38,6 +76,7 @@ const NON_WRITING_TOOLS: Record<string, true> = {
 };
 
 export default function remoteBuild(pi: ExtensionAPI) {
+	setupLanguageReader();
 	/** Environment state per worktree root, for this agent session. */
 	const envs = new Map<string, EnvState>();
 
@@ -99,24 +138,24 @@ export default function remoteBuild(pi: ExtensionAPI) {
 		try {
 			await checkHost();
 		} catch (error) {
-			ctx.ui.notify(`remote-build: build host check failed, worktree not created: ${errorMessage(error)}`, "error");
+			ctx.ui.notify(`${tr("remote-build: build host check failed, worktree not created: ", "remote-build：构建主机检查失败，未创建 worktree：")}${errorMessage(error)}`, "error");
 			return { handled: true };
 		}
 		const before = ctx.sessionManager.getCwd();
 		void waitForMove(ctx, before).then(
 			async moved => {
 				const root = await worktreeRoot(moved);
-				ctx.ui.setStatus("remote-build", `remote-build: preparing ${root}`);
+				ctx.ui.setStatus("remote-build", `${tr("remote-build: preparing ", "remote-build：正在准备 ")}${root}`);
 				try {
 					const env = await begin(root, source.config);
-					ctx.ui.notify(`remote-build: ready ${env.container} <- ${root}`, "info");
+					ctx.ui.notify(`${tr("remote-build: ready ", "remote-build：已就绪 ")}${env.container} <- ${root}`, "info");
 				} catch (error) {
-					ctx.ui.notify(`remote-build: environment failed for ${root}: ${errorMessage(error)}`, "error");
+					ctx.ui.notify(`${tr("remote-build: environment failed for ", "remote-build：环境失败：")}${root}: ${errorMessage(error)}`, "error");
 				} finally {
 					ctx.ui.setStatus("remote-build", undefined);
 				}
 			},
-			(error: unknown) => ctx.ui.notify(`remote-build: ${errorMessage(error)}`, "warning"),
+			(error: unknown) => ctx.ui.notify(`${tr("remote-build: ", "remote-build：")}${errorMessage(error)}`, "warning"),
 		);
 		return undefined;
 	});
