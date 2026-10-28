@@ -215,6 +215,7 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 
 	pi.registerTool({
 		name: "container_exec",
+		defaultInactive: true,
 		label: tr("Container exec", "容器执行"),
 		description: "Open an interactive PTY in the current remote-build container through Komodo, optionally sending initial input. Returns a session ID and output; drive it with container_write_stdin. The container working directory is set by deployment, not this tool. Komodo reuses the terminal named shell per container: reuse an existing session instead of opening competing clients. " + EXIT_NOTE,
 		parameters: execSchema,
@@ -247,6 +248,7 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 
 	pi.registerTool({
 		name: "container_write_stdin",
+		defaultInactive: true,
 		label: tr("Container stdin", "容器标准输入"),
 		description: "Send characters (C-style escapes decoded) to a container PTY and/or poll for output. Omit chars for a pure poll. The yield window defaults to 250 ms; cancellation stops waiting without killing the session. " + EXIT_NOTE,
 		parameters: writeSchema,
@@ -266,6 +268,7 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 
 	pi.registerTool({
 		name: "container_list_sessions",
+		defaultInactive: true,
 		label: tr("Container sessions", "容器会话"),
 		description: "List container PTY sessions for the current remote-build environment. Ended sessions remain listed until their final output is polled or they are killed. " + EXIT_NOTE,
 		parameters: listSchema,
@@ -290,6 +293,7 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 
 	pi.registerTool({
 		name: "container_kill_session",
+		defaultInactive: true,
 		label: tr("Kill container session", "终止容器会话"),
 		description: "Terminate the local km PTY client with SIGTERM, escalating to SIGKILL after two seconds. This does not stop or delete the container; the reused remote shell may remain alive. Prefer sending exit\\n to end the shell itself. " + EXIT_NOTE,
 		parameters: killSchema,

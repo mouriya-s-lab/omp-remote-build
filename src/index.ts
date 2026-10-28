@@ -7,6 +7,7 @@ import { registerContainerTools } from "./container-tools.ts";
 import { checkHost, envIdFor, mainCheckout, prepareEnv, worktreeRoot } from "./environment.ts";
 import { loadHost } from "./host.ts";
 import { registerInitTools } from "./init.ts";
+import { PREPARER_AGENT_NAME } from "./preparer.ts";
 import { findSession, flush } from "./mutagen.ts";
 import type { EnvState, PreparedEnv, RemoteBuildConfig } from "./types.ts";
 import { setupI18n, tr } from "./i18n.ts";
@@ -75,6 +76,18 @@ const NON_WRITING_TOOLS: Record<string, true> = {
 	remote_env_build_image: true,
 };
 
+const CONTAINER_TOOLS = ["container_exec", "container_write_stdin", "container_list_sessions", "container_kill_session"];
+
+/** Every tool this plugin registers. All are registered inactive; {@link activeToolsFor} decides which are shown. */
+const PLUGIN_TOOLS: Record<string, true> = {
+	container_exec: true,
+	container_write_stdin: true,
+	container_list_sessions: true,
+	container_kill_session: true,
+	remote_env_init: true,
+	remote_env_build_image: true,
+};
+
 export default function remoteBuild(pi: ExtensionAPI) {
 	setupLanguageReader();
 	/** Environment state per worktree root, for this agent session. */
@@ -129,9 +142,38 @@ export default function remoteBuild(pi: ExtensionAPI) {
 	registerContainerTools(pi, ensureEnv);
 	registerInitTools(pi, ensureEnv);
 
+	/**
+	 * Shows this plugin's tools only where `ensureEnv` would accept them, for the session's role,
+	 * and leaves every other tool's activation as it is. OMP has no event for a session moving to
+	 * another directory, so this runs at session start/switch, on every input (a human move command
+	 * is followed by the next input), after `/worktree` has moved the session, and before every agent
+	 * start (moves made by tools are followed by an agent start without an input).
+	 */
+	const syncActiveTools = async (ctx: ExtensionContext): Promise<void> => {
+		const wanted = await activeToolsFor(ctx);
+		const current = pi.getActiveTools();
+		const kept = current.filter(name => !(name in PLUGIN_TOOLS));
+		if (kept.length + wanted.length === current.length && wanted.every(name => current.includes(name))) return;
+		await pi.setActiveTools([...kept, ...wanted]);
+	};
+	const syncActiveToolsLogged = (ctx: ExtensionContext): Promise<void> =>
+		syncActiveTools(ctx).catch((error: unknown) => {
+			ctx.ui.notify(`${tr("remote-build: updating tools failed: ", "remote-build：更新工具失败：")}${errorMessage(error)}`, "warning");
+		});
+
+	pi.on("session_switch", async (_event, ctx) => {
+		await syncActiveToolsLogged(ctx);
+	});
+
+	pi.on("before_agent_start", async (_event, ctx) => {
+		await syncActiveToolsLogged(ctx);
+		return undefined;
+	});
+
 	// /worktree: check the build host before the native command runs, then wait for
 	// the session to move into the new worktree and prepare its environment there.
 	pi.on("input", async (event, ctx) => {
+		await syncActiveToolsLogged(ctx);
 		if (!WORKTREE_COMMAND.test(event.text.trim())) return undefined;
 		const source = await projectConfig(ctx.cwd);
 		if (source === undefined) return undefined;
@@ -144,6 +186,7 @@ export default function remoteBuild(pi: ExtensionAPI) {
 		const before = ctx.sessionManager.getCwd();
 		void waitForMove(ctx, before).then(
 			async moved => {
+				await syncActiveToolsLogged(ctx);
 				const root = await worktreeRoot(moved);
 				ctx.ui.setStatus("remote-build", `${tr("remote-build: preparing ", "remote-build：正在准备 ")}${root}`);
 				try {
@@ -161,6 +204,7 @@ export default function remoteBuild(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		await syncActiveToolsLogged(ctx);
 		const project = await projectConfig(ctx.cwd);
 		if (project === undefined) return;
 		if (ctx.agent.kind === "sub" && isIsolatedSubagent(ctx)) {
@@ -195,7 +239,13 @@ export default function remoteBuild(pi: ExtensionAPI) {
 	});
 }
 
-async function projectConfig(cwd: string): Promise<{ root: string; config: RemoteBuildConfig } | undefined> {
+/** An opted-in worktree: its canonical root and the config read from it. */
+interface Project {
+	readonly root: string;
+	readonly config: RemoteBuildConfig;
+}
+
+async function projectConfig(cwd: string): Promise<Project | undefined> {
 	let root: string;
 	try {
 		root = await worktreeRoot(cwd);
@@ -204,6 +254,22 @@ async function projectConfig(cwd: string): Promise<{ root: string; config: Remot
 	}
 	const config = await loadConfig(root);
 	return config === undefined ? undefined : { root, config };
+}
+
+/**
+ * The plugin tools to show in `ctx`'s session: none unless `ctx.cwd` is in a linked worktree whose root
+ * has a valid `.omp/remote-build.json` (the conditions `ensureEnv` enforces); then the container tools
+ * plus `remote_env_build_image` for the preparer or `remote_env_init` for every other agent.
+ */
+async function activeToolsFor(ctx: ExtensionContext): Promise<string[]> {
+	let project: Project | undefined;
+	try {
+		project = await projectConfig(ctx.cwd);
+	} catch {
+		return []; // invalid config: ensureEnv would reject every call
+	}
+	if (project === undefined || project.root === (await mainCheckout(project.root))) return [];
+	return [...CONTAINER_TOOLS, ctx.agent.name === PREPARER_AGENT_NAME ? "remote_env_build_image" : "remote_env_init"];
 }
 
 function isIsolatedSubagent(ctx: ExtensionContext): boolean {
