@@ -96,7 +96,7 @@ sequenceDiagram
 
 **构建。** Periphery 运行在一个看不到 `remoteRoot` 的容器里，所以镜像构建不使用 Komodo Builds。每次构建都是一个 `docker:cli` 的一次性 Deployment，名为 `rb-build-<id>`，它挂载主机的 Docker socket 和构建上下文，运行 `docker build`。当 Dockerfile 的某个阶段是 `FROM rb-base-archlinux:latest` 而该镜像缺失时（它和其他未使用的镜像一样会被清理），插件先用 [`images/archlinux.Dockerfile`](images/archlinux.Dockerfile) 构建它：带 `base-devel`、`git`、`sudo` 和 `paru` 的 Arch Linux。构建和 bootstrap 容器以重启策略 `no` 运行一次，它们的 Deployment 会被下一次运行复用。
 
-**Preparer subagent。** 没有 Dockerfile 时，`remote_env_init` 确保基础镜像存在，用它部署 worktree 容器，并以会话的模型在 worktree 里运行一个 `remote-env-preparer` subagent。subagent 阅读项目、在容器里试验，然后调用 `remote_env_build_image`，传入一个最终阶段为 `FROM rb-base-archlinux:latest`、不含 `COPY` 或 `ADD` 的 Dockerfile，以及一条 bootstrap 命令。它用 `pacman` 安装官方软件包，用 `paru` 安装 AUR 软件包，有 `-bin` 版本时一律选它。`remote_env_build_image` 从一个空的临时上下文 `<remoteRoot>/prepare/<id>/` 构建候选镜像，用它重建容器并运行 bootstrap 命令；最后一个成功的候选保留在该临时目录里。项目的构建和测试在该容器里通过后，subagent 结束。只有当它的最终回答写明 `result: success` 时，`remote_env_init` 才会发布到 worktree，每个文件都通过原子 rename 写入，配置最后写：
+**Preparer subagent。** 没有 Dockerfile 时，`remote_env_init` 确保基础镜像存在，用它部署 worktree 容器，并以会话的模型在 worktree 里运行一个 `remote-env-preparer` subagent。subagent 阅读项目、在容器里试验，然后调用 `remote_env_build_image`，传入一个最终阶段为 `FROM rb-base-archlinux:latest`、不含 `COPY` 或 `ADD` 的 Dockerfile，以及一条 bootstrap 命令。它用 `pacman` 安装官方软件包，用 `paru` 安装 AUR 软件包，有 `-bin` 版本时一律选它。`remote_env_build_image` 从一个空的临时上下文 `<remoteRoot>/prepare/<id>/` 构建候选镜像，用它重建容器并运行 bootstrap 命令；最后一个成功的候选保留在该临时目录里。项目的构建和测试在该容器里通过后，subagent 结束。它的最终回答是 subagent 通过 `yield` 提交、由 harness 按固定 schema 校验的结构化报告；只有该报告的 `result` 为 `success` 时，`remote_env_init` 才会发布到 worktree，每个文件都通过原子 rename 写入，配置最后写：
 
 |文件|内容|
 |---|---|
