@@ -284,7 +284,6 @@ async function initEnvironment(
 export function registerInitTools(pi: ExtensionAPI, ensureEnv: (cwd: string) => Promise<PreparedEnv>): void {
 	pi.registerTool({
 		name: "remote_env_init",
-		defaultInactive: true,
 		label: tr("Remote env init", "远程环境初始化"),
 		description:
 			`Prepare this worktree's remote build container and return a report for the agent: resolve the project image (configured image, the worktree's Dockerfile, or an Arch Linux image prepared by a subagent and published to ${GENERATED_DOCKERFILE} and ${CONFIG_PATH}; images are cached on the build host per Dockerfile content), recreate the container from it, and run the project's bootstrap command. Call it before the first container_exec in a worktree whose container is not running, and after dependency changes. Recreating the container ends open container sessions.`,
@@ -302,7 +301,6 @@ export function registerInitTools(pi: ExtensionAPI, ensureEnv: (cwd: string) => 
 
 	pi.registerTool({
 		name: "remote_env_build_image",
-		defaultInactive: true,
 		label: tr("Remote env build image", "远程环境构建镜像"),
 		description:
 			"Preparer-only: build a candidate project image from a Dockerfile, recreate this worktree's container from it, and run the bootstrap command. The last successful candidate is published to the worktree when the preparer reports result: success. Returns the build and bootstrap output.",

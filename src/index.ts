@@ -15,6 +15,9 @@ import { setupI18n, tr } from "./i18n.ts";
 /** `/worktree [branch]` and its registered name `/wt`. */
 const WORKTREE_COMMAND = /^\/(?:wt|worktree)(?:\s|$)/;
 
+/** Commands that move the session to another directory: `/worktree`, `/wt` and `/move <path>`. */
+const MOVE_COMMAND = /^\/(?:wt|worktree|move)(?:\s|$)/;
+
 /** Upper bound for the native command to move the session into the new worktree. */
 const MOVE_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -78,7 +81,7 @@ const NON_WRITING_TOOLS: Record<string, true> = {
 
 const CONTAINER_TOOLS = ["container_exec", "container_write_stdin", "container_list_sessions", "container_kill_session"];
 
-/** Every tool this plugin registers. All are registered inactive; {@link activeToolsFor} decides which are shown. */
+/** Every tool this plugin registers; {@link activeToolsFor} decides which of them a session shows. */
 const PLUGIN_TOOLS: Record<string, true> = {
 	container_exec: true,
 	container_write_stdin: true,
@@ -143,18 +146,29 @@ export default function remoteBuild(pi: ExtensionAPI) {
 	registerInitTools(pi, ensureEnv);
 
 	/**
+	 * Tools this plugin has deactivated in this session. Only these are ever activated again, so a
+	 * session whose caller left a tool out of its explicit tool list never gains it from this plugin.
+	 */
+	const deactivated = new Set<string>();
+
+	/**
 	 * Shows this plugin's tools only where `ensureEnv` would accept them, for the session's role,
-	 * and leaves every other tool's activation as it is. OMP has no event for a session moving to
-	 * another directory, so this runs at session start/switch, on every input (a human move command
-	 * is followed by the next input), after `/worktree` has moved the session, and before every agent
-	 * start (moves made by tools are followed by an agent start without an input).
+	 * and leaves every other tool's activation as it is. The tools are registered active, so a session
+	 * that starts where they apply presents them as OMP decides (`xd://` devices); a tool activated
+	 * again later is presented top-level, because `setActiveTools` pins names it newly enables.
+	 * OMP has no event for a session moving to another directory, so this runs at session
+	 * start/switch, after `/worktree`, `/wt` or `/move` has moved the session, and before every
+	 * agent start (covering moves made without those inputs, such as by an extension tool).
 	 */
 	const syncActiveTools = async (ctx: ExtensionContext): Promise<void> => {
-		const wanted = await activeToolsFor(ctx);
+		const wanted = new Set(await activeToolsFor(ctx));
 		const current = pi.getActiveTools();
-		const kept = current.filter(name => !(name in PLUGIN_TOOLS));
-		if (kept.length + wanted.length === current.length && wanted.every(name => current.includes(name))) return;
-		await pi.setActiveTools([...kept, ...wanted]);
+		const removed = current.filter(name => name in PLUGIN_TOOLS && !wanted.has(name));
+		const restored = [...deactivated].filter(name => wanted.has(name) && !current.includes(name));
+		if (removed.length === 0 && restored.length === 0) return;
+		await pi.setActiveTools([...current.filter(name => !removed.includes(name)), ...restored]);
+		for (const name of removed) deactivated.add(name);
+		for (const name of restored) deactivated.delete(name);
 	};
 	const syncActiveToolsLogged = (ctx: ExtensionContext): Promise<void> =>
 		syncActiveTools(ctx).catch((error: unknown) => {
@@ -170,23 +184,25 @@ export default function remoteBuild(pi: ExtensionAPI) {
 		return undefined;
 	});
 
-	// /worktree: check the build host before the native command runs, then wait for
-	// the session to move into the new worktree and prepare its environment there.
+	// /worktree and /move: once the session has moved, show the tools that apply there.
+	// /worktree in an opted-in project also checks the build host before the native command
+	// runs and prepares the new worktree's environment after the move.
 	pi.on("input", async (event, ctx) => {
-		await syncActiveToolsLogged(ctx);
-		if (!WORKTREE_COMMAND.test(event.text.trim())) return undefined;
-		const source = await projectConfig(ctx.cwd);
-		if (source === undefined) return undefined;
-		try {
-			await checkHost();
-		} catch (error) {
-			ctx.ui.notify(`${tr("remote-build: build host check failed, worktree not created: ", "remote-build：构建主机检查失败，未创建 worktree：")}${errorMessage(error)}`, "error");
-			return { handled: true };
+		const text = event.text.trim();
+		if (!MOVE_COMMAND.test(text)) return undefined;
+		const source = WORKTREE_COMMAND.test(text) ? await projectConfig(ctx.cwd) : undefined;
+		if (source !== undefined) {
+			try {
+				await checkHost();
+			} catch (error) {
+				ctx.ui.notify(`${tr("remote-build: build host check failed, worktree not created: ", "remote-build：构建主机检查失败，未创建 worktree：")}${errorMessage(error)}`, "error");
+				return { handled: true };
+			}
 		}
-		const before = ctx.sessionManager.getCwd();
-		void waitForMove(ctx, before).then(
+		void waitForMove(ctx, ctx.sessionManager.getCwd()).then(
 			async moved => {
 				await syncActiveToolsLogged(ctx);
+				if (source === undefined) return;
 				const root = await worktreeRoot(moved);
 				ctx.ui.setStatus("remote-build", `${tr("remote-build: preparing ", "remote-build：正在准备 ")}${root}`);
 				try {
@@ -198,7 +214,10 @@ export default function remoteBuild(pi: ExtensionAPI) {
 					ctx.ui.setStatus("remote-build", undefined);
 				}
 			},
-			(error: unknown) => ctx.ui.notify(`${tr("remote-build: ", "remote-build：")}${errorMessage(error)}`, "warning"),
+			(error: unknown) => {
+				// A failed /move or a /worktree outside a remote-build project changes nothing here.
+				if (source !== undefined) ctx.ui.notify(`${tr("remote-build: ", "remote-build：")}${errorMessage(error)}`, "warning");
+			},
 		);
 		return undefined;
 	});
@@ -257,14 +276,15 @@ async function projectConfig(cwd: string): Promise<Project | undefined> {
 }
 
 /**
- * The plugin tools to show in `ctx`'s session: none unless `ctx.cwd` is in a linked worktree whose root
- * has a valid `.omp/remote-build.json` (the conditions `ensureEnv` enforces); then the container tools
- * plus `remote_env_build_image` for the preparer or `remote_env_init` for every other agent.
+ * The plugin tools to show in `ctx`'s session: none unless the session's current cwd is in a linked
+ * worktree whose root has a valid `.omp/remote-build.json` (the conditions `ensureEnv` enforces); then the
+ * container tools plus `remote_env_build_image` for the preparer or `remote_env_init` for every other agent.
+ * The cwd comes from the session manager: `ctx.cwd` is fixed when the event's context is created.
  */
 async function activeToolsFor(ctx: ExtensionContext): Promise<string[]> {
 	let project: Project | undefined;
 	try {
-		project = await projectConfig(ctx.cwd);
+		project = await projectConfig(ctx.sessionManager.getCwd());
 	} catch {
 		return []; // invalid config: ensureEnv would reject every call
 	}
