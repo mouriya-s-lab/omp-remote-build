@@ -4,7 +4,7 @@ import { CONFIG_PATH, GENERATED_DOCKERFILE, PREPARER_REPORT, loadConfig, publish
 import { envContainerSpec, mainCheckout, projectIdFor } from "./environment.ts";
 import { ensureContainer, imageExists, runOnce } from "./komodo.ts";
 import { flush } from "./mutagen.ts";
-import { PREPARER_AGENT_NAME, runPreparer } from "./preparer.ts";
+import { PREPARER_AGENT_NAME, renderPreparerReport, runPreparer } from "./preparer.ts";
 import {
 	BASE_IMAGE,
 	buildProjectImage,
@@ -150,7 +150,7 @@ async function liveEnv(env: PreparedEnv): Promise<PreparedEnv> {
 }
 
 /**
- * Runs the preparer from an empty scratch directory, and once it reports `result: success`,
+ * Runs the preparer from an empty scratch directory, and once its report has `result: success`,
  * publishes its last successful candidate into the worktree. Returns the published Dockerfile.
  */
 async function prepare(
@@ -165,9 +165,12 @@ async function prepare(
 	const base = await ensureBaseImage(env.host, env.id, signal);
 	report.base_image = { kind: "line", value: `${BASE_IMAGE} (${base === "present" ? "present" : "built now"})` };
 	await ensureContainer(env.host, envContainerSpec(env, BASE_IMAGE), "redeploy");
-	const answer = await runPreparer(pi, ctx, env, signal);
+	const run = await runPreparer(pi, ctx, env, signal);
+	const answer = renderPreparerReport(run);
 	report.preparer_report = { kind: "verbatim", text: answer };
-	if (!/^result:\s*success\s*$/m.test(answer)) throw new Error("the preparer did not report result: success; nothing was published");
+	if (run.result !== "success") {
+		throw new Error(`the preparer reported result: ${run.result}; nothing was published`);
+	}
 	const [dockerfile, bootstrap] = await Promise.all([readRemoteFile(env.host, `${dir}/Dockerfile`), readRemoteFile(env.host, `${dir}/bootstrap`)]);
 	if (dockerfile === undefined || bootstrap === undefined) {
 		throw new Error("the preparer reported success without a successful remote_env_build_image; nothing was published");
@@ -303,7 +306,7 @@ export function registerInitTools(pi: ExtensionAPI, ensureEnv: (cwd: string) => 
 		name: "remote_env_build_image",
 		label: tr("Remote env build image", "远程环境构建镜像"),
 		description:
-			"Preparer-only: build a candidate project image from a Dockerfile, recreate this worktree's container from it, and run the bootstrap command. The last successful candidate is published to the worktree when the preparer reports result: success. Returns the build and bootstrap output.",
+			"Preparer-only: build a candidate project image from a Dockerfile, recreate this worktree's container from it, and run the bootstrap command. The last successful candidate is published to the worktree when the preparer's final report has result: success. Returns the build and bootstrap output.",
 		parameters: buildSchema,
 		async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
 			const params = buildSchema.parse(rawParams);
@@ -340,7 +343,7 @@ export function registerInitTools(pi: ExtensionAPI, ensureEnv: (cwd: string) => 
 			}
 			await writeRemoteFile(env.host, `${dir}/Dockerfile`, dockerfile);
 			await writeRemoteFile(env.host, `${dir}/bootstrap`, bootstrap ?? "");
-			lines.push(`candidate: this Dockerfile and bootstrap are published to ${GENERATED_DOCKERFILE} and ${CONFIG_PATH} when you finish with result: success`);
+			lines.push(`candidate: this Dockerfile and bootstrap are published to ${GENERATED_DOCKERFILE} and ${CONFIG_PATH} when your final report has result: success`);
 			const text = lines.join("\n");
 			return { content: [{ type: "text", text }], details: { report: text } };
 		},
