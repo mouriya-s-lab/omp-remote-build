@@ -116,8 +116,8 @@ export default function remoteBuild(pi: ExtensionAPI) {
 	};
 
 	const stateFor = (cwd: string): EnvState | undefined => {
-		// ctx.cwd may differ in letter case from git's root on case-insensitive file systems.
-		const real = realpathSync.native(cwd);
+		const real = canonicalPath(cwd);
+		if (real === undefined) return undefined;
 		for (const [root, state] of envs) {
 			if (real === root || real.startsWith(`${root}/`)) return state;
 		}
@@ -299,6 +299,20 @@ function isIsolatedSubagent(ctx: ExtensionContext): boolean {
 	return ctx.sessionManager
 		.getEntries()
 		.some(entry => entry.type === "session_init" && "isolated" in entry && entry.isolated === true);
+}
+
+/**
+ * Canonical form of `path`, or `undefined` when it no longer exists (e.g. the session's worktree was
+ * removed): a missing path lies in no prepared worktree. `path` may differ in letter case from git's
+ * root on case-insensitive file systems, so the comparison uses the real path.
+ */
+function canonicalPath(path: string): string | undefined {
+	try {
+		return realpathSync.native(path);
+	} catch (error) {
+		if (error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR")) return undefined;
+		throw error;
+	}
 }
 
 /** Resolves with the session cwd once the native command has moved the session away from `before`. */
