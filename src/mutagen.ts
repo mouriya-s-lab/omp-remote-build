@@ -1,5 +1,6 @@
 import { run } from "./run.ts";
 import type { EnvId, HostConfig, MutagenIgnoreRules } from "./types.ts";
+import { RemoteBuildError } from "./diagnostics.ts";
 
 const ENV_LABEL = "rb-env";
 
@@ -13,7 +14,7 @@ export async function findSession(host: HostConfig, id: EnvId): Promise<string |
 		"--template={{range .}}{{.Identifier}}\n{{end}}",
 	]);
 	const ids = out.split("\n").filter(line => line.trim() !== "");
-	if (ids.length > 1) throw new Error(`multiple Mutagen sessions labelled ${ENV_LABEL}=${id}: ${ids.join(", ")}`);
+	if (ids.length > 1) throw new RemoteBuildError({ kind: "mutagen-duplicate", label: `${ENV_LABEL}=${id}`, ids });
 	return ids[0];
 }
 
@@ -40,7 +41,7 @@ export async function createSession(
 		`${host.ssh}:${remotePath}`,
 	]);
 	const session = await findSession(host, id);
-	if (session === undefined) throw new Error(`Mutagen session rb-${id} not found after creation`);
+	if (session === undefined) throw new RemoteBuildError({ kind: "mutagen-missing", id });
 	return session;
 }
 

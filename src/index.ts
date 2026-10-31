@@ -11,6 +11,7 @@ import { PREPARER_AGENT_NAME } from "./preparer.ts";
 import { findSession, flush } from "./mutagen.ts";
 import type { EnvState, PreparedEnv, RemoteBuildConfig } from "./types.ts";
 import { setupI18n, tr } from "./i18n.ts";
+import { humanErrorMessage, RemoteBuildError } from "./diagnostics.ts";
 
 /** `/worktree [branch]` and its registered name `/wt`. */
 const WORKTREE_COMMAND = /^\/(?:wt|worktree)(?:\s|$)/;
@@ -175,7 +176,7 @@ export default function remoteBuild(pi: ExtensionAPI) {
 	};
 	const syncActiveToolsLogged = (ctx: ExtensionContext): Promise<void> =>
 		syncActiveTools(ctx).catch((error: unknown) => {
-			ctx.ui.notify(`${tr("remote-build: updating tools failed: ", "remote-build：更新工具失败：")}${errorMessage(error)}`, "warning");
+			ctx.ui.notify(`${tr("remote-build: updating tools failed: ", "remote-build：更新工具失败：")}${humanErrorMessage(error)}`, "warning");
 		});
 
 	pi.on("session_switch", async (_event, ctx) => {
@@ -198,7 +199,7 @@ export default function remoteBuild(pi: ExtensionAPI) {
 			try {
 				await checkHost();
 			} catch (error) {
-				ctx.ui.notify(`${tr("remote-build: build host check failed, worktree not created: ", "remote-build：构建主机检查失败，未创建 worktree：")}${errorMessage(error)}`, "error");
+				ctx.ui.notify(`${tr("remote-build: build host check failed, worktree not created: ", "remote-build：构建主机检查失败，未创建 worktree：")}${humanErrorMessage(error)}`, "error");
 				return { handled: true };
 			}
 		}
@@ -212,14 +213,14 @@ export default function remoteBuild(pi: ExtensionAPI) {
 					const env = await begin(root, source.config);
 					ctx.ui.notify(`${tr("remote-build: ready ", "remote-build：已就绪 ")}${env.container} <- ${root}`, "info");
 				} catch (error) {
-					ctx.ui.notify(`${tr("remote-build: environment failed for ", "remote-build：环境失败：")}${root}: ${errorMessage(error)}`, "error");
+					ctx.ui.notify(`${tr("remote-build: environment failed for ", "remote-build：环境失败：")}${root}: ${humanErrorMessage(error)}`, "error");
 				} finally {
 					ctx.ui.setStatus("remote-build", undefined);
 				}
 			},
 			(error: unknown) => {
 				// A failed /move or a /worktree outside a remote-build project changes nothing here.
-				if (source !== undefined) ctx.ui.notify(`${tr("remote-build: ", "remote-build：")}${errorMessage(error)}`, "warning");
+				if (source !== undefined) ctx.ui.notify(`${tr("remote-build: ", "remote-build：")}${humanErrorMessage(error)}`, "warning");
 			},
 		);
 		return undefined;
@@ -322,7 +323,7 @@ function waitForMove(ctx: ExtensionContext, before: string): Promise<string> {
 	const tick = () => {
 		const now = ctx.sessionManager.getCwd();
 		if (now !== before) return resolve(now);
-		if (Date.now() > deadline) return reject(new Error("/worktree did not move the session; no environment prepared"));
+		if (Date.now() > deadline) return reject(new RemoteBuildError({ kind: "move-timeout" }));
 		setTimeout(tick, 100);
 	};
 	setTimeout(tick, 100);

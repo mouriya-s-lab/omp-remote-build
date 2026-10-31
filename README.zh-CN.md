@@ -163,6 +163,8 @@ omomp-lang:
 
 每次解析都会重新读取环境变量。只有配置设置在第一次需要时读取一次，并缓存到进程结束；文件修改从下一次启动 omp 起生效。发给模型的文字不使用这套语言选择逻辑。
 
+通知中由插件生成的诊断详情也在通知生成时使用同一语言。命令输出和其他外部错误内容保持原样；工具说明、报告和工具错误仍使用面向模型的英文。
+
 ## 配置
 
 ### 1. 主机配置（每个用户）：`~/.omp/agent/remote-build.json`
@@ -260,6 +262,8 @@ secret = "S-..."
 |`container_list_sessions`|列出本环境的 PTY 会话，包括最终输出尚未被轮询的已结束会话。|
 |`container_kill_session`|终止本地 `km` 客户端（SIGTERM，2 s 后 SIGKILL）。这不会停止容器，远端 shell 可能比它活得久；优先发送 `exit\n`。|
 
+六个工具的详细调用说明都位于 `xd://<tool>/usage`，由简短的 `xd://<tool>` 工具说明指向。topic 涵盖会话生命周期与传输层退出状态，或初始化与 preparer 发布要求。
+
 这些工具和 preparer 专用的 `remote_env_build_image` 只在能运行的地方启用：已选择加入的项目里、`.omp/remote-build.json` 能正确解析的 linked worktree。其他地方（包括主检出）插件会在会话开始时停用它们，不占提示词。preparer 得到容器工具和 `remote_env_build_image`；其他会话得到容器工具和 `remote_env_init`。`/worktree`、`/wt` 或 `/move` 移动会话后，以及每轮 agent 开始前，插件都会重新判断，且只改动自己的工具。在这类 worktree 里开始的会话以 `xd://` 设备呈现它们；移动后才启用的工具以顶层工具呈现，因为 omp 的 `setActiveTools` 把新启用的工具放在顶层。
 
 `km exec` 本身总是以 0 退出，所以传输层的退出码不能说明你的命令结果。请从 shell 里读取命令结果，例如 `cargo test; echo $?`。会话运行时，每个结果显示渲染后的终端：自上次调用以来滚出屏幕的行，然后是当前屏幕；没有变化时显示 `(screen unchanged since the last call)`。已结束的会话返回不可变的最终活动屏幕。实时更新在输出解析后读取不消费轮询观察的屏幕快照，以 250 ms 节流，并在调用仍附着期间补发尾次更新。输出经过净化，并按 omp 默认的尾部限制截断；完整记录保存在会话的 `log_path`。会话限定在当前 cwd 的环境内。轮询已结束会话的最终输出或终止会话时，先释放终端再移除会话；omp 关闭时终止所有剩余的本地传输并释放其活动终端。
@@ -304,6 +308,7 @@ ssh <host> docker run --rm -v <remoteRoot>:/rb archlinux:latest rm -rf /rb/<id>
 ```bash
 bun install
 bunx tsc --noEmit -p .
+bun test
 ```
 
 开发依赖 `omp-unified-exec` 提供类型检查和用 `omp -e src/index.ts` 从本检出加载插件时使用的 API。该 API 更新后执行 `bun update omp-unified-exec`。运行时，已安装的插件使用作为 omp 插件安装的那份副本。要针对本地 unified-exec 检出做检查时，临时让开发依赖解析到该检出，完成类型检查后恢复依赖解析，不提交此临时改动。

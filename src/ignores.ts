@@ -13,6 +13,7 @@ import { lstat, readFile, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { MutagenIgnoreRules, RemoteBuildConfig } from "./types.js";
+import { RemoteBuildError } from "./diagnostics.ts";
 
 type GitResult = { readonly text: string; readonly code: number };
 
@@ -28,14 +29,14 @@ async function git(root: string, args: readonly string[], input?: string): Promi
 		child.exited,
 	]);
 	if (code !== 0 && !(code === 1 && (args[0] === "config" || args[0] === "check-ignore"))) {
-		throw new Error(`Cannot derive remote-build ignores: git ${args[0]} failed (${code}): ${stderr.trim()}`);
+		throw new RemoteBuildError({ kind: "ignore-command", command: args[0]!, code, output: stderr.trim() });
 	}
 	return { text, code };
 }
 
 function nulFields(text: string): string[] {
 	if (text === "") return [];
-	if (!text.endsWith("\0")) throw new Error("Git returned an unterminated path list while deriving remote-build ignores");
+	if (!text.endsWith("\0")) throw new RemoteBuildError({ kind: "ignore-response", reason: "unterminated" });
 	return text.slice(0, -1).split("\0");
 }
 
@@ -51,7 +52,7 @@ async function ignoredDirectories(root: string, paths: readonly string[]): Promi
 	if (paths.length === 0) return ignored;
 	const { text } = await git(root, ["check-ignore", "--no-index", "-v", "-z", "--stdin"], `${paths.map((path) => `${path}/`).join("\0")}\0`);
 	const fields = nulFields(text);
-	if (fields.length % 4 !== 0) throw new Error("Git returned an invalid verbose ignore response");
+	if (fields.length % 4 !== 0) throw new RemoteBuildError({ kind: "ignore-response", reason: "verbose" });
 	for (let index = 0; index < fields.length; index += 4) {
 		const pattern = fields[index + 2]!;
 		const path = fields[index + 3]!.slice(0, -1);
@@ -72,7 +73,7 @@ async function optionalFile(path: string, worktree = false): Promise<string | un
 		return await readFile(path, "utf8");
 	} catch (error) {
 		if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
-		throw new Error(`Cannot read Git ignore file ${path}`, { cause: error });
+		throw new RemoteBuildError({ kind: "ignore-read", path }, { cause: error });
 	}
 }
 
@@ -110,7 +111,7 @@ function translateGlob(pattern: string, ignoreCase: boolean, source: string): st
 		const character = pattern[index]!;
 		if (character === "\\") {
 			const next = pattern[++index];
-			if (next === undefined) throw new Error(`Unsupported trailing escape in Git ignore file ${source}`);
+			if (next === undefined) throw new RemoteBuildError({ kind: "ignore-pattern", path: source, reason: "escape" });
 			result += /^[a-zA-Z]$/.test(next) ? foldLetter(next, ignoreCase) : `\\${next}`;
 		} else if (character === "[") {
 			let content = "";
@@ -129,12 +130,12 @@ function translateGlob(pattern: string, ignoreCase: boolean, source: string): st
 					const end = pattern.indexOf(":]", index + 2);
 					const name = end === -1 ? "" : pattern.slice(index + 2, end);
 					const expanded = characterClasses[name];
-					if (expanded === undefined) throw new Error(`Unsupported character class in Git ignore file ${source}`);
+					if (expanded === undefined) throw new RemoteBuildError({ kind: "ignore-pattern", path: source, reason: "class" });
 					content += expanded;
 					index = end + 1;
 				} else content += current;
 			}
-			if (!closed) throw new Error(`Unclosed character class in Git ignore file ${source}`);
+			if (!closed) throw new RemoteBuildError({ kind: "ignore-pattern", path: source, reason: "unclosed" });
 			if (ignoreCase) {
 				// Test the positive class, then union opposite-case ASCII letters.
 				const expression = new RegExp(`^[${content}]$`, "u");

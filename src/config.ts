@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { ImageSource, RemoteBuildConfig } from "./types.ts";
+import { RemoteBuildError } from "./diagnostics.ts";
 
 /** Path of the opt-in config, relative to a worktree root. */
 export const CONFIG_PATH = ".omp/remote-build.json";
@@ -97,7 +98,7 @@ const KNOWN_FIELDS: Record<ConfigField, true> = {
 function parseConfig(raw: unknown): RemoteBuildConfig {
 	const obj = record(raw, "config");
 	for (const key of Object.keys(obj)) {
-		if (!(key in KNOWN_FIELDS)) throw new Error(`${CONFIG_PATH}: unknown field "${key}"`);
+		if (!(key in KNOWN_FIELDS)) throw new RemoteBuildError({ kind: "config-field", path: CONFIG_PATH, field: key, reason: "unknown" });
 	}
 	return {
 		imageSource: imageSource(obj.image, obj.dockerfile),
@@ -114,7 +115,7 @@ function parseConfig(raw: unknown): RemoteBuildConfig {
 
 function imageSource(image: unknown, dockerfile: unknown): ImageSource {
 	if (image !== undefined && dockerfile !== undefined) {
-		throw new Error(`${CONFIG_PATH}: set at most one of "image" and "dockerfile"`);
+		throw new RemoteBuildError({ kind: "config-image-source", path: CONFIG_PATH });
 	}
 	if (image !== undefined) return { kind: "configured", image: nonEmptyString(image, "image") };
 	if (dockerfile !== undefined) return { kind: "dockerfile", path: relativePath(nonEmptyString(dockerfile, "dockerfile"), "dockerfile") };
@@ -124,39 +125,39 @@ function imageSource(image: unknown, dockerfile: unknown): ImageSource {
 function bootstrap(value: unknown): string | null {
 	if (value === undefined) return null;
 	const command = nonEmptyString(value, "bootstrap");
-	if (/[\r\n\0]/.test(command)) throw new Error(`${CONFIG_PATH}: bootstrap must be a single line`);
+	if (/[\r\n\0]/.test(command)) throw new RemoteBuildError({ kind: "config-field", path: CONFIG_PATH, field: "bootstrap", reason: "single-line" });
 	return command;
 }
 
 function record(value: unknown, field: string): Record<string, unknown> {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {
-		throw new Error(`${CONFIG_PATH}: ${field} must be an object`);
+		throw new RemoteBuildError({ kind: "config-field", path: CONFIG_PATH, field, reason: "object" });
 	}
 	return value as Record<string, unknown>;
 }
 
 function nonEmptyString(value: unknown, field: string): string {
 	if (typeof value !== "string" || value.trim() === "") {
-		throw new Error(`${CONFIG_PATH}: ${field} must be a non-empty string`);
+		throw new RemoteBuildError({ kind: "config-field", path: CONFIG_PATH, field, reason: "text" });
 	}
 	return value;
 }
 
 function absolutePath(value: unknown, field: string): string {
 	const s = nonEmptyString(value, field);
-	if (!s.startsWith("/")) throw new Error(`${CONFIG_PATH}: ${field} must be an absolute path`);
+	if (!s.startsWith("/")) throw new RemoteBuildError({ kind: "config-field", path: CONFIG_PATH, field, reason: "absolute" });
 	return s;
 }
 
 function relativePath(value: string, field: string): string {
 	if (value.startsWith("/") || value.split("/").includes("..")) {
-		throw new Error(`${CONFIG_PATH}: ${field} entries must be repo-relative paths without "..": ${value}`);
+		throw new RemoteBuildError({ kind: "config-relative", path: CONFIG_PATH, field, value });
 	}
 	return value.replace(/\/+$/, "");
 }
 
 function stringArray(value: unknown, field: string): string[] {
-	if (!Array.isArray(value)) throw new Error(`${CONFIG_PATH}: ${field} must be an array of strings`);
+	if (!Array.isArray(value)) throw new RemoteBuildError({ kind: "config-field", path: CONFIG_PATH, field, reason: "strings" });
 	return value.map((item, i) => nonEmptyString(item, `${field}[${i}]`));
 }
 

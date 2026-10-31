@@ -1,5 +1,6 @@
+import { readFileSync } from "node:fs";
 import { z } from "@oh-my-pi/pi-coding-agent";
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import { CONFIG_PATH, GENERATED_DOCKERFILE, PREPARER_REPORT, loadConfig, publishPreparedImage, readPreparerReport } from "./config.ts";
 import { envContainerSpec, mainCheckout, projectIdFor } from "./environment.ts";
 import { ensureContainer, imageExists, runOnce } from "./komodo.ts";
@@ -285,11 +286,11 @@ async function initEnvironment(
 
 /** Registers `remote_env_init` (agents) and `remote_env_build_image` (the preparer subagent only). */
 export function registerInitTools(pi: ExtensionAPI, ensureEnv: (cwd: string) => Promise<PreparedEnv>): void {
-	pi.registerTool({
+	const initTool = {
 		name: "remote_env_init",
 		label: tr("Remote env init", "远程环境初始化"),
-		description:
-			`Prepare this worktree's remote build container and return a report for the agent: resolve the project image (configured image, the worktree's Dockerfile, or an Arch Linux image prepared by a subagent and published to ${GENERATED_DOCKERFILE} and ${CONFIG_PATH}; images are cached on the build host per Dockerfile content), recreate the container from it, and run the project's bootstrap command. Call it before the first container_exec in a worktree whose container is not running, and after dependency changes. Recreating the container ends open container sessions.`,
+		description: "Prepare this worktree's remote build container and return an initialization report.\n\nTopics — read the one a call needs before making it:\n- `xd://remote_env_init/usage` — before initializing, rebuilding, or recreating a worktree environment",
+		docTopics: () => ({ usage: readFileSync(new URL("./topics/remote_env_init/usage.md", import.meta.url), "utf8") }),
 		parameters: initSchema,
 		async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
 			const params = initSchema.parse(rawParams);
@@ -300,13 +301,14 @@ export function registerInitTools(pi: ExtensionAPI, ensureEnv: (cwd: string) => 
 			const report = await initEnvironment(pi, ctx, await ensureEnv(ctx.cwd), mode, signal);
 			return { content: [{ type: "text", text: report }], details: { report } };
 		},
-	});
+	} satisfies ToolDefinition<typeof initSchema> & { docTopics(): Readonly<Record<string, string>> };
+	pi.registerTool(initTool);
 
-	pi.registerTool({
+	const buildTool = {
 		name: "remote_env_build_image",
 		label: tr("Remote env build image", "远程环境构建镜像"),
-		description:
-			"Preparer-only: build a candidate project image from a Dockerfile, recreate this worktree's container from it, and run the bootstrap command. The last successful candidate is published to the worktree when the preparer's final report has result: success. Returns the build and bootstrap output.",
+		description: "Build a candidate project image and run bootstrap for the preparer subagent.\n\nTopics — read the one a call needs before making it:\n- `xd://remote_env_build_image/usage` — before building a candidate or publishing the preparer's final report",
+		docTopics: () => ({ usage: readFileSync(new URL("./topics/remote_env_build_image/usage.md", import.meta.url), "utf8") }),
 		parameters: buildSchema,
 		async execute(_toolCallId, rawParams, signal, _onUpdate, ctx) {
 			const params = buildSchema.parse(rawParams);
@@ -347,5 +349,6 @@ export function registerInitTools(pi: ExtensionAPI, ensureEnv: (cwd: string) => 
 			const text = lines.join("\n");
 			return { content: [{ type: "text", text }], details: { report: text } };
 		},
-	});
+	} satisfies ToolDefinition<typeof buildSchema> & { docTopics(): Readonly<Record<string, string>> };
+	pi.registerTool(buildTool);
 }

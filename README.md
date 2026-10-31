@@ -163,6 +163,8 @@ omomp-lang:
 
 Environment variables are read on every resolution. Only the configuration setting is read once, when first needed, and cached for the process; file changes apply from the next omp start. Text sent to the model does not use this language selection.
 
+Plugin-authored diagnostic details in notifications use the same language at notification time. Command output and other external error payloads remain unchanged; tool descriptions, reports and tool errors stay model-facing English.
+
 ## Configuration
 
 ### 1. Host config (per user): `~/.omp/agent/remote-build.json`
@@ -260,6 +262,8 @@ The container runs `sleep infinity` with restart policy `unless-stopped`. All wo
 |`container_list_sessions`|List this environment's PTY sessions, including ended ones whose final output has not been polled.|
 |`container_kill_session`|Terminate the local `km` client (SIGTERM, then SIGKILL after 2 s). This does not stop the container, and the remote shell may outlive it; prefer sending `exit\n`.|
 
+Each of the six tools exposes its detailed calling instructions at `xd://<tool>/usage`, linked from the tool's short `xd://<tool>` description. These topics cover session lifecycle and transport exit status, or initialization and preparer publication requirements.
+
 These tools, and the preparer's `remote_env_build_image`, are active only where they can run: in a linked worktree of an opted-in project whose `.omp/remote-build.json` parses. Elsewhere, including the main checkout, the plugin deactivates them at session start, so they take no space in the prompt. The preparer gets the container tools and `remote_env_build_image`; every other session gets the container tools and `remote_env_init`. The plugin re-evaluates after `/worktree`, `/wt` or `/move` moves the session, and before every agent turn, and changes only its own tools. A session that starts in such a worktree shows them as `xd://` devices. Tools activated after a move appear as top-level tools, because omp's `setActiveTools` presents tools it newly enables at the top level.
 
 `km exec` itself always exits 0, so the transport's exit code says nothing about your command. Read command results from the shell, for example `cargo test; echo $?`. While a session is running, each result shows the rendered terminal: lines that scrolled off since the previous call, then the current screen; `(screen unchanged since the last call)` when nothing changed. An ended session returns its immutable final active screen. Live updates read non-consuming screen snapshots after output has been parsed, throttled to one update per 250 ms with a trailing update while the call remains attached. Output is sanitized and truncated to omp's default tail limits; the full transcript is kept in the session's `log_path`. Sessions are scoped to the environment of the current cwd. Polling an ended session's final output or killing it releases its terminal before removing the session; omp shutdown terminates all remaining local transports and releases their live terminals.
@@ -304,6 +308,7 @@ Named volumes listed in `volumes` are shared between environments and are not ti
 ```bash
 bun install
 bunx tsc --noEmit -p .
+bun test
 ```
 
 The `omp-unified-exec` dev dependency provides the API used for type-checking and for loading this checkout with `omp -e src/index.ts`. Run `bun update omp-unified-exec` when that API moves. At runtime an installed plugin uses the copy installed as an omp plugin. When checking against a local unified-exec checkout, temporarily resolve the dev dependency to that checkout, run the type-check, and restore the dependency resolution without committing it.

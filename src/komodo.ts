@@ -1,4 +1,5 @@
 import type { ContainerSpec, HostConfig, ImageBuildSpec, OnceResult } from "./types.ts";
+import { RemoteBuildError } from "./diagnostics.ts";
 
 interface Endpoint {
 	readonly host: string;
@@ -59,28 +60,28 @@ type ContainerProcess =
 
 function record(value: unknown, field: string): Record<string, unknown> {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) {
-		throw new Error(`Invalid Komodo response: ${field} must be an object`);
+		throw new RemoteBuildError({ kind: "komodo-shape", field, expected: "object" });
 	}
 	return value as Record<string, unknown>;
 }
 
 function string(value: unknown, field: string): string {
-	if (typeof value !== "string") throw new Error(`Invalid Komodo response: ${field} must be a string`);
+	if (typeof value !== "string") throw new RemoteBuildError({ kind: "komodo-shape", field, expected: "string" });
 	return value;
 }
 
 function boolean(value: unknown, field: string): boolean {
-	if (typeof value !== "boolean") throw new Error(`Invalid Komodo response: ${field} must be a boolean`);
+	if (typeof value !== "boolean") throw new RemoteBuildError({ kind: "komodo-shape", field, expected: "boolean" });
 	return value;
 }
 
 function number(value: unknown, field: string): number {
-	if (typeof value !== "number") throw new Error(`Invalid Komodo response: ${field} must be a number`);
+	if (typeof value !== "number") throw new RemoteBuildError({ kind: "komodo-shape", field, expected: "number" });
 	return value;
 }
 
 function array(value: unknown, field: string): readonly unknown[] {
-	if (!Array.isArray(value)) throw new Error(`Invalid Komodo response: ${field} must be an array`);
+	if (!Array.isArray(value)) throw new RemoteBuildError({ kind: "komodo-shape", field, expected: "array" });
 	return value;
 }
 
@@ -96,16 +97,16 @@ async function loadEndpoint(host: HostConfig): Promise<Endpoint> {
 		parsed = Bun.TOML.parse(await Bun.file(path).text());
 	} catch {
 		// TOML diagnostics may contain the original line, including a credential.
-		throw new Error(`Cannot read or parse km CLI config: ${path}`);
+		throw new RemoteBuildError({ kind: "km-config-read", path });
 	}
 	const profiles = array(record(parsed, "km CLI config").profile ?? [], "km CLI config [[profile]]").map((entry) => record(entry, "[[profile]]"));
 	const fields = profiles.find((entry) => entry.name === host.komodo.profile
 		|| (Array.isArray(entry.aliases) && entry.aliases.includes(host.komodo.profile)));
-	if (fields === undefined) throw new Error(`km CLI config ${path} has no [[profile]] named "${host.komodo.profile}"`);
+	if (fields === undefined) throw new RemoteBuildError({ kind: "km-profile-missing", path, profile: host.komodo.profile });
 	const required = (name: "host" | "key" | "secret"): string => {
 		const value = fields[name];
 		if (typeof value !== "string" || value.length === 0 || /[\r\n\0]/.test(value)) {
-			throw new Error(`km CLI profile "${host.komodo.profile}" has an invalid ${name} field`);
+			throw new RemoteBuildError({ kind: "km-profile-field", profile: host.komodo.profile, field: name });
 		}
 		return value;
 	};
@@ -114,10 +115,10 @@ async function loadEndpoint(host: HostConfig): Promise<Endpoint> {
 	try {
 		parsedUrl = new URL(url);
 	} catch {
-		throw new Error(`km CLI profile "${host.komodo.profile}" host must be an HTTP(S) URL`);
+		throw new RemoteBuildError({ kind: "km-profile-url", profile: host.komodo.profile, reason: "url" });
 	}
 	if ((parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") || parsedUrl.username || parsedUrl.password || parsedUrl.search || parsedUrl.hash) {
-		throw new Error(`km CLI profile "${host.komodo.profile}" host must be an HTTP(S) URL without embedded credentials, query or fragment`);
+		throw new RemoteBuildError({ kind: "km-profile-url", profile: host.komodo.profile, reason: "components" });
 	}
 	return { host: url.replace(/\/+$/, ""), key: required("key"), secret: required("secret") };
 }
@@ -131,19 +132,19 @@ async function send(endpoint: Endpoint, operation: Request): Promise<Response> {
 			signal: AbortSignal.timeout(30_000),
 		});
 	} catch {
-		throw new Error(`Komodo ${operation.type} could not reach Komodo Core ${endpoint.host} (network failure or 30s request timeout)`);
+		throw new RemoteBuildError({ kind: "komodo-network", operation: operation.type, host: endpoint.host });
 	}
 }
 
 function failure(operation: Request, response: Response): Error {
-	return new Error(`Komodo ${operation.type} failed: HTTP ${response.status}${response.status === 401 || response.status === 403 ? " (authentication or authorization failed)" : ""}`);
+	return new RemoteBuildError({ kind: "komodo-http", operation: operation.type, status: response.status });
 }
 
 async function json(operation: Request, response: Response): Promise<unknown> {
 	try {
 		return await response.json();
 	} catch {
-		throw new Error(`Komodo ${operation.type} returned invalid JSON`);
+		throw new RemoteBuildError({ kind: "komodo-json", operation: operation.type });
 	}
 }
 
@@ -193,7 +194,7 @@ function parseDeployment(value: unknown): Deployment {
 			imageName = null;
 			break;
 		default:
-			throw new Error("Invalid Komodo response: unknown Deployment image variant");
+			throw new RemoteBuildError({ kind: "komodo-variant", variant: "image" });
 	}
 	return {
 		id: mongoId(resource),
@@ -222,37 +223,37 @@ function parseUpdate(value: unknown): Update {
 		case "Complete":
 			return { id, status: "Complete", success: boolean(update.success, "Update.success") };
 		default:
-			throw new Error("Invalid Komodo response: unknown Update status");
+			throw new RemoteBuildError({ kind: "komodo-variant", variant: "update" });
 	}
 }
 
 function shellWord(value: string): string {
 	// Komodo v2.2 parses multiline key/value text, then concatenates it into a shell command.
 	if (/[\r\n\0]/.test(value) || value.includes(" #")) {
-		throw new Error("Komodo environment and volume values cannot contain CR, LF, NUL or the comment delimiter ' #' (Komodo key/value parser limitation)");
+		throw new RemoteBuildError({ kind: "komodo-value", reason: "shell" });
 	}
 	return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function commandWord(value: string): string {
 	// The command is a single shell line, not key/value text: only line breaks and NUL are unsafe.
-	if (/[\r\n\0]/.test(value)) throw new Error("Komodo container command words cannot contain CR, LF or NUL");
+	if (/[\r\n\0]/.test(value)) throw new RemoteBuildError({ kind: "komodo-value", reason: "command" });
 	return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
 function managedConfig(spec: ContainerSpec, process: ContainerProcess, server: string): ManagedConfig {
-	if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(spec.name)) throw new Error("Invalid Komodo container name");
-	if (!/^[a-zA-Z0-9][a-zA-Z0-9_./:@+-]*$/.test(spec.image)) throw new Error("Invalid Komodo container image reference");
-	if (spec.workdir !== null && !spec.workdir.startsWith("/")) throw new Error("Komodo container workdir must be an absolute path");
+	if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(spec.name)) throw new RemoteBuildError({ kind: "komodo-value", reason: "name" });
+	if (!/^[a-zA-Z0-9][a-zA-Z0-9_./:@+-]*$/.test(spec.image)) throw new RemoteBuildError({ kind: "komodo-value", reason: "image" });
+	if (spec.workdir !== null && !spec.workdir.startsWith("/")) throw new RemoteBuildError({ kind: "komodo-value", reason: "workdir" });
 	const volumes = spec.mounts.map((mount) => {
 		const separator = mount.indexOf(":");
 		if (separator <= 0 || separator === mount.length - 1 || mount.slice(0, separator).includes("=")) {
-			throw new Error("Invalid Komodo volume: expected host-or-volume:container[:mode]");
+			throw new RemoteBuildError({ kind: "komodo-value", reason: "volume" });
 		}
 		return `${shellWord(mount.slice(0, separator))}:${shellWord(mount.slice(separator + 1))}`;
 	});
 	const environment = Object.keys(spec.env).sort().map((name) => {
-		if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) throw new Error("Invalid Komodo environment variable name");
+		if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) throw new RemoteBuildError({ kind: "komodo-value", reason: "env" });
 		return `${name}=${shellWord(spec.env[name]!)}`;
 	}).join("\n");
 	const extraArgs = spec.workdir === null ? [] : ["--workdir", shellWord(spec.workdir)];
@@ -292,18 +293,18 @@ async function deploy(endpoint: Endpoint, deployment: string): Promise<void> {
 	}));
 	const deadline = Date.now() + 10 * 60_000;
 	while (update.status !== "Complete") {
-		if (Date.now() >= deadline) throw new Error(`Komodo deployment ${deployment} timed out waiting for Update ${update.id}`);
+		if (Date.now() >= deadline) throw new RemoteBuildError({ kind: "deployment-timeout", deployment, update: update.id });
 		await Bun.sleep(1_000);
 		update = parseUpdate(await request(endpoint, { endpoint: "read", type: "GetUpdate", params: { id: update.id } }));
 	}
-	if (!update.success) throw new Error(`Komodo deployment ${deployment} failed (Update ${update.id}); inspect the Update in Komodo Core`);
+	if (!update.success) throw new RemoteBuildError({ kind: "deployment-failed", deployment, update: update.id });
 }
 
 async function waitRunning(endpoint: Endpoint, deployment: string): Promise<void> {
 	const runningDeadline = Date.now() + 60_000;
 	let state = await containerState(endpoint, deployment);
 	while (state !== "running") {
-		if (Date.now() >= runningDeadline) throw new Error(`Komodo deployment ${deployment} did not become running within 60s (last state: ${state})`);
+		if (Date.now() >= runningDeadline) throw new RemoteBuildError({ kind: "deployment-not-running", deployment, state });
 		await Bun.sleep(1_000);
 		state = await containerState(endpoint, deployment);
 	}
@@ -361,15 +362,15 @@ export async function runOnce(
 	const deadline = Date.now() + options.timeoutMs;
 	let state: Record<string, unknown>;
 	for (;;) {
-		if (options.signal?.aborted) throw new Error(`${spec.name} aborted`);
+		if (options.signal?.aborted) throw new RemoteBuildError({ kind: "container-aborted", name: spec.name });
 		const current = await inspectContainer(endpoint, host, spec.name);
-		if (current === undefined) throw new Error(`container ${spec.name} disappeared before it exited`);
+		if (current === undefined) throw new RemoteBuildError({ kind: "container-disappeared", name: spec.name });
 		const status = string(current.Status, "State.Status");
 		if (status === "exited" || status === "dead") {
 			state = current;
 			break;
 		}
-		if (Date.now() >= deadline) throw new Error(`${spec.name} still running after ${Math.round(options.timeoutMs / 60_000)} min`);
+		if (Date.now() >= deadline) throw new RemoteBuildError({ kind: "container-timeout", name: spec.name, minutes: Math.round(options.timeoutMs / 60_000) });
 		await Bun.sleep(2_000);
 	}
 	const log = record(await request(endpoint, {

@@ -1,3 +1,5 @@
+import { RemoteBuildError } from "./diagnostics.ts";
+
 /** Runs a binary with argv (no shell) and returns its exit code and output. */
 export async function runResult(
 	argv: readonly string[],
@@ -20,7 +22,7 @@ export async function runResult(
 export async function run(argv: readonly string[], options: { stdin?: Uint8Array } = {}): Promise<string> {
 	const { code, stdout, stderr } = await runResult(argv, options);
 	if (code !== 0) {
-		throw new Error(`${argv.slice(0, 3).join(" ")} exited ${code}: ${stderr.trim() || stdout.trim()}`);
+		throw new RemoteBuildError({ kind: "command-exit", command: argv.slice(0, 3).join(" "), code, output: stderr.trim() || stdout.trim() });
 	}
 	return stdout;
 }

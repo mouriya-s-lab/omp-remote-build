@@ -1,5 +1,6 @@
+import { readFileSync } from "node:fs";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateTail, z } from "@oh-my-pi/pi-coding-agent";
-import type { AgentToolResult, AgentToolUpdateCallback, ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { AgentToolResult, AgentToolUpdateCallback, ExtensionAPI, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
 import type { CollectResult } from "omp-unified-exec/src/collect.ts";
 import { waitForExitOrDeadline } from "omp-unified-exec/src/long-wait.ts";
 import { sanitizeOutputText } from "omp-unified-exec/src/output-safety.ts";
@@ -213,10 +214,11 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 		}));
 	});
 
-	pi.registerTool({
+	const execTool = {
 		name: "container_exec",
 		label: tr("Container exec", "容器执行"),
-		description: "Open an interactive PTY in the current remote-build container through Komodo, optionally sending initial input. Returns a session ID and output; drive it with container_write_stdin. The container working directory is set by deployment, not this tool. Komodo reuses the terminal named shell per container: reuse an existing session instead of opening competing clients. " + EXIT_NOTE,
+		description: "Open an interactive PTY in the current remote-build container through Komodo.\n\nTopics — read the one a call needs before making it:\n- `xd://container_exec/usage` — before opening a container terminal or interpreting its exit status",
+		docTopics: () => ({ usage: readFileSync(new URL("./topics/container_exec/usage.md", import.meta.url), "utf8") }),
 		parameters: execSchema,
 		async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
 			const params = execSchema.parse(rawParams);
@@ -233,6 +235,7 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 			}
 			const session = ExecSession.spawn(store.allocateId(), {
 				command: execArgv(env.host, env.container, env.config.shell),
+				title: tr(`Container ${env.container}`, `容器 ${env.container}`),
 				cwd: env.root,
 				env: process.env,
 				cols: 120,
@@ -243,12 +246,14 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 			sendInput(session, params.input);
 			return collectSession(session, params.yield_time_ms ?? 10_000, signal, onUpdate);
 		},
-	});
+	} satisfies ToolDefinition<typeof execSchema> & { docTopics(): Readonly<Record<string, string>> };
+	pi.registerTool(execTool);
 
-	pi.registerTool({
+	const writeTool = {
 		name: "container_write_stdin",
 		label: tr("Container stdin", "容器标准输入"),
-		description: "Send characters (C-style escapes decoded) to a container PTY and/or poll for output. Omit chars for a pure poll. The yield window defaults to 250 ms; cancellation stops waiting without killing the session. " + EXIT_NOTE,
+		description: "Send characters to a container PTY and/or poll for output.\n\nTopics — read the one a call needs before making it:\n- `xd://container_write_stdin/usage` — before sending input, polling output, or interpreting exit status",
+		docTopics: () => ({ usage: readFileSync(new URL("./topics/container_write_stdin/usage.md", import.meta.url), "utf8") }),
 		parameters: writeSchema,
 		async execute(_toolCallId, rawParams, signal, onUpdate, ctx) {
 			const params = writeSchema.parse(rawParams);
@@ -262,12 +267,14 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 			}
 			return result;
 		},
-	});
+	} satisfies ToolDefinition<typeof writeSchema> & { docTopics(): Readonly<Record<string, string>> };
+	pi.registerTool(writeTool);
 
-	pi.registerTool({
+	const listTool = {
 		name: "container_list_sessions",
 		label: tr("Container sessions", "容器会话"),
-		description: "List container PTY sessions for the current remote-build environment. Ended sessions remain listed until their final output is polled or they are killed. " + EXIT_NOTE,
+		description: "List container PTY sessions for the current remote-build environment.\n\nTopics — read the one a call needs before making it:\n- `xd://container_list_sessions/usage` — before listing sessions or interpreting ended sessions and transport status",
+		docTopics: () => ({ usage: readFileSync(new URL("./topics/container_list_sessions/usage.md", import.meta.url), "utf8") }),
 		parameters: listSchema,
 		async execute(_toolCallId, rawParams, _signal, _onUpdate, ctx) {
 			listSchema.parse(rawParams);
@@ -286,12 +293,14 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 				details: { sessions },
 			};
 		},
-	});
+	} satisfies ToolDefinition<typeof listSchema> & { docTopics(): Readonly<Record<string, string>> };
+	pi.registerTool(listTool);
 
-	pi.registerTool({
+	const killTool = {
 		name: "container_kill_session",
 		label: tr("Kill container session", "终止容器会话"),
-		description: "Terminate the local km PTY client with SIGTERM, escalating to SIGKILL after two seconds. This does not stop or delete the container; the reused remote shell may remain alive. Prefer sending exit\\n to end the shell itself. " + EXIT_NOTE,
+		description: "Terminate the local km PTY client for a container session.\n\nTopics — read the one a call needs before making it:\n- `xd://container_kill_session/usage` — before terminating a client or choosing how to end its remote shell",
+		docTopics: () => ({ usage: readFileSync(new URL("./topics/container_kill_session/usage.md", import.meta.url), "utf8") }),
 		parameters: killSchema,
 		async execute(_toolCallId, rawParams, _signal, onUpdate, ctx) {
 			const params = killSchema.parse(rawParams);
@@ -303,5 +312,6 @@ export function registerContainerTools(pi: ExtensionAPI, ensureEnv: (cwd: string
 			store.remove(session.id);
 			return result;
 		},
-	});
+	} satisfies ToolDefinition<typeof killSchema> & { docTopics(): Readonly<Record<string, string>> };
+	pi.registerTool(killTool);
 }

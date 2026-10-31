@@ -15,6 +15,15 @@
     "url": "git+https://github.com/oh-my-omp/omp-remote-build.git"
   },
   "type": "module",
+  "files": [
+    "src",
+    "!src/**/*.test.ts",
+    "images",
+    "examples",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
   "omp": {
     "extensions": [
       "./src/index.ts"
