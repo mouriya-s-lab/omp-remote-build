@@ -147,16 +147,21 @@ Then create the two config files described below and restart `omp`.
 
 ## UI language
 
-Person-facing labels, statuses and notifications use `OMOMP_LANG` when it is `en` or `zh` (case-insensitive). Otherwise, the first non-empty `LC_ALL`, `LC_MESSAGES` or `LANG` is used (`zh` when it starts with `zh`, otherwise `en`), and the default is `en`.
+Person-facing labels, statuses and notifications resolve their language each time they are generated:
 
-In an omp session, the OMP-only plugin also reads the `omomp-lang` section from the single `omomp.yml`, `omomp.yaml`, `omomp.json` or `omomp.toml` file in omp's agent directory when `OMOMP_LANG` is not set to a supported value:
+1. `OMOMP_LANG`, trimmed and case-insensitive, when it is `en` or `zh`; unsupported values are ignored.
+2. The `omomp-lang` section in omp's agent directory, only when exactly one of `omomp.yml`, `omomp.yaml`, `omomp.json` or `omomp.toml` exists there. Multiple files are ambiguous and this step is skipped. The section must contain only `language`, whose value must be exactly `en` or `zh` (no whitespace or case normalization). Missing, malformed or invalid settings are ignored. Project `.omp/` copies are not read.
+3. The first non-empty value of `LC_ALL`, `LC_MESSAGES` or `LANG`, after trimming: `zh` when it starts with `zh` (case-insensitive), otherwise `en`.
+4. English.
+
+For example, in the agent directory's `omomp.yml`:
 
 ```yaml
 omomp-lang:
   language: zh
 ```
 
-The file is read once when the plugin first needs the setting. The setting applies from the next omp start.
+Environment variables are read on every resolution. Only the configuration setting is read once, when first needed, and cached for the process; file changes apply from the next omp start. Text sent to the model does not use this language selection.
 
 ## Configuration
 

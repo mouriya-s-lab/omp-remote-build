@@ -45,7 +45,10 @@ function readOmompLanguage(agentDir: string): unknown {
 		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
 		const section = (parsed as Record<string, unknown>)["omomp-lang"];
 		if (typeof section !== "object" || section === null || Array.isArray(section)) return undefined;
-		return (section as Record<string, unknown>).language;
+		const keys = Object.keys(section);
+		if (keys.length !== 1 || keys[0] !== "language") return undefined;
+		const language = (section as Record<string, unknown>).language;
+		return language === "en" || language === "zh" ? language : undefined;
 	} catch {
 		return undefined;
 	}

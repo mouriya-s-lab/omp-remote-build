@@ -147,16 +147,21 @@ omp install https://github.com/oh-my-omp/omp-remote-build
 
 ## UI 语言
 
-面向用户的标签、状态和通知在 `OMOMP_LANG` 为 `en` 或 `zh`（不区分大小写）时使用该值。否则使用 `LC_ALL`、`LC_MESSAGES`、`LANG` 中第一个非空值（以 `zh` 开头时使用中文，否则使用英文）；都没有时默认为英文。
+面向用户的标签、状态和通知在每次生成时按以下顺序解析语言：
 
-在 omp 会话中，这个 OMP-only 插件还会在 `OMOMP_LANG` 不是受支持的值时，从 omp agent 目录中唯一的 `omomp.yml`、`omomp.yaml`、`omomp.json` 或 `omomp.toml` 文件读取 `omomp-lang`：
+1. `OMOMP_LANG`：去掉首尾空白、不区分大小写，为 `en` 或 `zh` 时采用；不支持的值忽略。
+2. omp agent 目录中的 `omomp-lang` 段：仅当该目录里恰好存在一个 `omomp.yml`、`omomp.yaml`、`omomp.json` 或 `omomp.toml` 时读取；多个文件视为有歧义，跳过此步骤。段内只能有 `language`，值必须精确为 `en` 或 `zh`，不去空白、不转换大小写。缺失、解析失败或不合法的设置都会被忽略。不读取项目 `.omp/` 里的副本。
+3. `LC_ALL`、`LC_MESSAGES`、`LANG` 中去掉首尾空白后第一个非空的值：以 `zh` 开头时使用中文（不区分大小写），否则使用英文。
+4. 英文。
+
+例如，agent 目录中的 `omomp.yml`：
 
 ```yaml
 omomp-lang:
   language: zh
 ```
 
-插件在第一次需要该设置时读取文件一次；设置从下一次启动 omp 起生效。
+每次解析都会重新读取环境变量。只有配置设置在第一次需要时读取一次，并缓存到进程结束；文件修改从下一次启动 omp 起生效。发给模型的文字不使用这套语言选择逻辑。
 
 ## 配置
 
